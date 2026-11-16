@@ -193,6 +193,7 @@ Trend: düşüş (EMA20 < EMA50, kapanış EMA50 altında)
 | `InpMagicNumber` | `20261117` | Magic number (CCI botundan farklı) |
 | `InpMaxSpreadPoints` | `0` | Maks. spread (0 = kapalı) |
 | `InpMaxOpenPositions` | `1` | Maks. açık pozisyon (0 = sınırsız) |
+| `InpReverseMode` | `false` | **Ters işlem modu**: BUY sinyalinde SELL, SL/TP yer değiştirir |
 | `InpMaxSL_ATR` | `3.0` | SL mesafesi bu ATR katını aşarsa işlem atlanır |
 | `InpMoneyTakeProfit` / `InpMoneyStopLoss` | `0` / `0` | Para bazlı çıkışlar (0 = kapalı) |
 | `InpMaxPositionMinutes` | `0` | Maks. pozisyon süresi (0 = kapali) |
@@ -237,7 +238,27 @@ Preset yüklemek için: EA parametreleri → **Load (Yükle)** → `.set` dosyas
 
 ---
 
-## 6. Risk ve Sınırlamalar
+## 6. Ters İşlem Modu (Reverse Mode)
+
+`InpReverseMode = true` iken bot **aynı sinyalleri ters yönde işler**:
+
+| Konu | Normal mod | Ters işlem modu |
+|---|---|---|
+| Sinyal yönü | BUY sinyali → BUY | BUY sinyali → **SELL** |
+| Sinyal yönü | SELL sinyali → SELL | SELL sinyali → **BUY** |
+| Stop Loss | stratejinin SL seviyesi | **eski TP mesafesinde** (girişin diğer tarafında) |
+| Take Profit | stratejinin TP seviyesi | **eski SL mesafesinde** |
+| TP'siz (gösterge çıkışlı) stratejiler | SL + gösterge çıkışı | SL girişe göre **aynalanır**, gösterge çıkışları pozisyon yönüne göre otomatik ters çalışır |
+| Bekleyen emirler | limit/stop | **limit ↔ stop** çevrilir (seviye piyasanın doğru tarafında kalır) |
+| Kısmi kâr (TP1) | TP1 + TP2 | SL ↔ en uzak hedef yer değişir, TP1 mesafesi SL'den gelir |
+
+**Nasıl çalışır:** sinyal/giriş koşulları, seviye hesapları ve trend/spread/saat filtreleri **hiç değişmez**; yalnızca emir gönderilirken yön ters çevrilir ve SL/TP **mesafeleri yer değiştirir**. `InpAllowLongs` / `InpAllowShorts` ve maks. SL (`InpMaxSL_ATR`) gibi risk filtreleri **işleme girecek gerçek yöne** uygulanır. Ters modda yeni SL mesafesi orijinalin TP mesafesi olduğu için maks. SL filtresi normalden sık devreye girebilir; gerekirse bu filtreyi gevşetin. Tüm hazır `.set` dosyalarında `InpReverseMode=false` gelir; ters mod için `true` yapın.
+
+Panel başlığında `[TERS ISLEM MODU]` görünür ve uzman günlüğüne uyarı basılır.
+
+> ⚠️ **Risk/ödül tersine döner:** orijinal strateji 20 pip SL / 40 pip TP kullanıyorsa ters modda 40 pip SL / 20 pip TP olur. Bu mod (a) bir stratejinin gerçekten kenar taşıyıp taşımadığını test etmek, (b) düşüş yükseliş dönemlerinde aynı kurulumların tersini işlemek için kullanılır. **Mutlaka Strategy Tester'da doğrulayın.**
+
+## 7. Risk ve Sınırlamalar
 
 - **Bu bir yatırım tavsiyesi değildir.** Forex/kripto kaldıraçlı işlemler yüksek risk taşır; önce **demo hesapta** test edin.
 - Bot **martingale/grid yapmaz**; tek pozisyon disiplinindedir.
@@ -248,7 +269,7 @@ Preset yüklemek için: EA parametreleri → **Load (Yükle)** → `.set` dosyas
 
 ---
 
-## 7. Dosya Listesi
+## 8. Dosya Listesi
 
 | Dosya | Açıklama |
 |---|---|
@@ -259,7 +280,7 @@ Preset yüklemek için: EA parametreleri → **Load (Yükle)** → `.set` dosyas
 
 ---
 
-## 8. Kaynakça
+## 9. Kaynakça
 
 - Trading Strategy Guides, *Rectangle Chart Pattern: The Secrets To Profitable Trades* —
   <https://tradingstrategyguides.com/rectangle-chart-pattern-strategy/>

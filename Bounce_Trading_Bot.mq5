@@ -144,6 +144,7 @@ input int             InpMaxSpreadPoints  = 0;    // Maksimum spread (point) - 0
 input int             InpMaxOpenPositions = 1;    // Maksimum acik pozisyon (0 = sinirsiz)
 input bool            InpAllowLongs       = true; // LONG islemler acik
 input bool            InpAllowShorts      = true; // SHORT islemler acik
+input bool            InpReverseMode      = false; // TERS ISLEM MODU: BUY sinyalinde SELL (SL/TP yer degisir)
 input double          InpMaxSL_ATR        = 3.0;  // SL mesafesi ATR x bu degeri asarsa islem atlanir (0 = kapali)
 input double          InpMoneyTakeProfit  = 0.0;  // Para TP (hesap birimi, 0 = kapali)
 input double          InpMoneyStopLoss    = 0.0;  // Para SL (hesap birimi, 0 = kapali)
@@ -887,6 +888,19 @@ void DrawZones()
 //+------------------------------------------------------------------+
 //| Kurulum durumu                                                   |
 //+------------------------------------------------------------------+
+
+// Ters islem modunda planlanan SL mesafesi = orijinal TP mesafesi (BE takibi icin)
+void FixPlannedForReverse(const double entry, const double sl, const double tp)
+  {
+   if(!InpReverseMode)
+      return;
+   double d_sl = (sl > 0.0 ? MathAbs(entry - sl) : 0.0);
+   double d_tp = (tp > 0.0 ? MathAbs(tp - entry) : 0.0);
+   double nsd  = (d_tp > 0.0 ? d_tp : d_sl);
+   if(nsd > 0.0)
+      g_planned_sl = entry + nsd;
+  }
+
 void ResetSetupValues()
   {
    g_state            = ST_IDLE;
@@ -930,9 +944,40 @@ void ResetSetup(const string reason)
 //+------------------------------------------------------------------+
 //| Emir gonderme                                                    |
 //+------------------------------------------------------------------+
-bool PlacePendingOrder(const int side, const ENUM_ORDER_TYPE type, const double price,
-                       const double sl, const double tp, const string comment)
+bool PlacePendingOrder(const int side_in, const ENUM_ORDER_TYPE type_in, const double price_in,
+                       const double sl_in, const double tp_in, const string comment)
   {
+   int side = side_in;
+   ENUM_ORDER_TYPE type = type_in;
+   double price = price_in;
+   double sl = sl_in;
+   double tp = tp_in;
+
+   // --- TERS ISLEM MODU: yon + emir tipi cevrilir, SL/TP mesafeleri yer degistirir ---
+   if(InpReverseMode)
+     {
+      double d_sl = (sl > 0.0 ? MathAbs(price - sl) : 0.0);
+      double d_tp = (tp > 0.0 ? MathAbs(tp - price) : 0.0);
+      side = -side;
+      if(d_sl > 0.0 || d_tp > 0.0)
+        {
+         double new_sl_dist = (d_tp > 0.0 ? d_tp : d_sl);
+         sl = NormalizePriceToTick(price - side * new_sl_dist, (side > 0 ? -1 : 1));
+         tp = ((d_sl > 0.0 && d_tp > 0.0)
+               ? NormalizePriceToTick(price + side * d_sl, (side > 0 ? -1 : 1))
+               : 0.0);
+        }
+      // limit <-> stop (aynalanan seviyeler piyasanin diger tarafinda kalir)
+      if(type == ORDER_TYPE_BUY_LIMIT)
+         type = ORDER_TYPE_SELL_STOP;
+      else if(type == ORDER_TYPE_SELL_LIMIT)
+         type = ORDER_TYPE_BUY_STOP;
+      else if(type == ORDER_TYPE_BUY_STOP)
+         type = ORDER_TYPE_SELL_LIMIT;
+      else if(type == ORDER_TYPE_SELL_STOP)
+         type = ORDER_TYPE_BUY_LIMIT;
+     }
+
    if(InpMaxOpenPositions > 0 && CountOurPositions(0) + CountOurPending() >= InpMaxOpenPositions + 1)
      {
       PrintFormat("Bekleyen emir siniri: acik=%d bekleyen=%d", CountOurPositions(0), CountOurPending());
@@ -979,18 +1024,22 @@ bool PlacePendingOrder(const int side, const ENUM_ORDER_TYPE type, const double 
    return true;
   }
 
-bool OpenTrade(const int side, const double sl, const double tp,
+bool OpenTrade(const int side_in, const double sl_in, const double tp_in,
                const string signal_text, const datetime signal_time,
                const double sig_high, const double sig_low)
   {
+   int side = side_in;
+   double sl = sl_in;
+   double tp = tp_in;
    if(side == 0)
       return false;
-   if(side > 0 && !InpAllowLongs)
+   int gate_side = (InpReverseMode ? -side : side);
+   if(gate_side > 0 && !InpAllowLongs)
      {
       g_last_action = "LONG giris ayarlardan kapali";
       return false;
      }
-   if(side < 0 && !InpAllowShorts)
+   if(gate_side < 0 && !InpAllowShorts)
      {
       g_last_action = "SHORT giris ayarlardan kapali";
       return false;
@@ -1027,6 +1076,22 @@ bool OpenTrade(const int side, const double sl, const double tp,
      }
 
    double entry = (side > 0 ? tick.ask : tick.bid);
+
+   // --- TERS ISLEM MODU: yon ters cevrilir, SL ve TP mesafeleri yer degistirir ---
+   if(InpReverseMode)
+     {
+      double d_sl = (sl > 0.0 ? MathAbs(entry - sl) : 0.0);
+      double d_tp = (tp > 0.0 ? MathAbs(tp - entry) : 0.0);
+      side = -side;
+      if(d_sl > 0.0 || d_tp > 0.0)
+        {
+         double new_sl_dist = (d_tp > 0.0 ? d_tp : d_sl);
+         sl = NormalizePriceToTick(entry - side * new_sl_dist, (side > 0 ? -1 : 1));
+         tp = ((d_sl > 0.0 && d_tp > 0.0)
+               ? NormalizePriceToTick(entry + side * d_sl, (side > 0 ? -1 : 1))
+               : 0.0);
+        }
+     }
 
    long stops_level  = (long)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    long freeze_level = (long)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
@@ -1264,9 +1329,10 @@ void TryArmSetup(const MqlRates &rates[], const double atr1, const double close1
       g_last_action = "Fiyat bir S/R bolgesine yaklasmadi";
       return;
      }
-   if(side > 0 && !InpAllowLongs)
+   int gate_side = (InpReverseMode ? -side : side);
+   if(gate_side > 0 && !InpAllowLongs)
       return;
-   if(side < 0 && !InpAllowShorts)
+   if(gate_side < 0 && !InpAllowShorts)
       return;
    if(!WithinTradingHours() || !DailyLimitsOK())
      {
@@ -1324,6 +1390,7 @@ void TryArmSetup(const MqlRates &rates[], const double atr1, const double close1
       g_planned_entry = entry;
       g_planned_sl    = sl;
       g_planned_tp    = tp;
+      FixPlannedForReverse(entry, sl, tp);
       g_signal_time   = rates[1].time;
       g_signal_high   = rates[1].high;
       g_signal_low    = rates[1].low;
@@ -1512,6 +1579,7 @@ void ProcessFirstFractal(const MqlRates &rates[], const double atr1)
    g_planned_entry = entry1;
    g_planned_sl    = sl;
    g_planned_tp    = tp;
+   FixPlannedForReverse(entry1, sl, tp);
    g_signal_time   = line2_time;
    g_signal_high   = MathMax(line2_price, entry1);
    g_signal_low    = MathMin(line2_price, entry1);
@@ -1588,7 +1656,7 @@ void CheckPendingFills()
       DeleteOurPending("pozisyon acildi");
       g_signal_count++;
       RefreshDailyCounters();
-      DrawSignalArrow(g_signal_time, g_signal_high, g_signal_low, side);
+      DrawSignalArrow(g_signal_time, g_signal_high, g_signal_low, (InpReverseMode ? -side : side));
       g_state       = ST_POSITION;
       g_last_action = StringFormat("%s bekleyen emir doldu", SideName(side));
       PrintFormat("GIRIS (bekleyen emir doldu): yon=%s | plan SL=%.*f TP=%.*f",
@@ -1624,7 +1692,7 @@ void ProcessBounceMode(const MqlRates &rates[], const double &atr[])
          DeleteOurPending("pozisyon acildi");
          g_signal_count++;
          RefreshDailyCounters();
-         DrawSignalArrow(g_signal_time, g_signal_high, g_signal_low, side);
+         DrawSignalArrow(g_signal_time, g_signal_high, g_signal_low, (InpReverseMode ? -side : side));
          g_state = ST_POSITION;
          g_last_action = StringFormat("%s bekleyen emir doldu", SideName(side));
         }
@@ -1749,7 +1817,7 @@ void UpdatePanel()
                                 SideName(g_side), _Digits, g_zone.bottom,
                                 _Digits, g_zone.top, g_zone_touches);
 
-   Comment("S/R BOUNCE ROBOT v1.00\n",
+   Comment("S/R BOUNCE ROBOT v1.00", (InpReverseMode ? "  [TERS ISLEM MODU]" : ""), "\n",
            "Sembol: ", _Symbol, " | TF: ", EnumToString(g_tf),
            " | spread: ", DoubleToString((SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
                                           SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point, 0),
@@ -1948,6 +2016,8 @@ int OnInit()
    PrintFormat("Risk: lot=%.2f risk=%s | SL tampon=%.2f ATR | TP=karsi S/R (yoksa x%.1f R) | magic=%d",
                InpLotSize, risk_txt, InpSLBufferATR, InpFallbackTP_RR, InpMagicNumber);
    Print("Sinyaller yalnizca KAPANMIS mumlarda degerlendirilir. Acilista gecmise donuk islem acilmaz.");
+   if(InpReverseMode)
+      Print(">>> TERS ISLEM MODU ACIK: BUY sinyalinde SELL, SELL sinyalinde BUY; SL ve TP yer degistirir; limit<->stop <<<");
    Print("Akis: S/R bolgesi -> yaklasim -> (dogrudan / mum onayi / iki fractal) -> giris -> karsi bolgede TP");
 
    UpdatePanel();

@@ -25,6 +25,7 @@ InpMaxSpreadPoints=0
 InpMaxOpenPositions=1
 InpAllowLongs=true
 InpAllowShorts=true
+InpReverseMode=false
 InpMaxSL_ATR=3.5
 InpMoneyTakeProfit=0.0
 InpMoneyStopLoss=0.0

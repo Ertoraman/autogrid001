@@ -117,6 +117,7 @@ input int    InpMaxSpreadPoints  = 0;         // Maksimum spread (point) - 0 = k
 input int    InpMaxOpenPositions = 1;         // Ayni anda maks. pozisyon - 0 = sinirsiz
 input bool   InpAllowLongs       = true;      // LONG acilsin
 input bool   InpAllowShorts      = true;      // SHORT acilsin
+input bool   InpReverseMode      = false;     // TERS ISLEM MODU: BUY sinyalinde SELL (SL/TP yer degisir)
 input double InpMaxSL_ATR        = 3.0;       // SL mesafesi ATR x bu degeri asarsa islem atlanir (0 = kapali)
 input int    InpSLBufferPoints   = 10;        // Swing SL tamponu (point)
 input int    InpFixedTpPoints    = 0;         // Sabit TP (point, 0 = kapali; TP varsayilan CCI ile)
@@ -548,17 +549,19 @@ void DrawSignalArrow(const datetime bar_time, const double high,
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
   }
 
-bool OpenTrade(const int side, const double swing_sl, const string signal_text,
+bool OpenTrade(const int side_in, const double swing_sl, const string signal_text,
                const datetime signal_time, const double sig_high, const double sig_low)
   {
+   int side = side_in;
    if(side == 0)
       return false;
-   if(side > 0 && !InpAllowLongs)
+   int gate_side = (InpReverseMode ? -side : side);
+   if(gate_side > 0 && !InpAllowLongs)
      {
       g_last_action = "LONG giris ayarlardan kapali";
       return false;
      }
-   if(side < 0 && !InpAllowShorts)
+   if(gate_side < 0 && !InpAllowShorts)
      {
       g_last_action = "SHORT giris ayarlardan kapali";
       return false;
@@ -611,6 +614,22 @@ bool OpenTrade(const int side, const double swing_sl, const string signal_text,
    if(InpFixedTpPoints > 0)
       tp = NormalizePriceToTick(entry + side * InpFixedTpPoints * _Point,
                                 (side > 0 ? 1 : -1));
+
+   // --- TERS ISLEM MODU: yon ters cevrilir, SL ve TP mesafeleri yer degistirir ---
+   if(InpReverseMode)
+     {
+      double d_sl = (sl > 0.0 ? MathAbs(entry - sl) : 0.0);
+      double d_tp = (tp > 0.0 ? MathAbs(tp - entry) : 0.0);
+      side = -side;
+      if(d_sl > 0.0 || d_tp > 0.0)
+        {
+         double new_sl_dist = (d_tp > 0.0 ? d_tp : d_sl);   // TP mesafesi SL olur
+         sl = NormalizePriceToTick(entry - side * new_sl_dist, (side > 0 ? -1 : 1));
+         tp = ((d_sl > 0.0 && d_tp > 0.0)
+               ? NormalizePriceToTick(entry + side * d_sl, (side > 0 ? -1 : 1))
+               : 0.0);                                     // SL mesafesi TP olur
+        }
+     }
 
    // Broker minimum mesafe kontrolu
    long stops_level  = (long)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
@@ -1052,7 +1071,7 @@ void UpdatePanel()
                                 g_pullback_count, InpPullbackCandles,
                                 DoubleToString(g_setup_extreme, _Digits));
 
-   Comment("CCI Trading System ROBOT v1.00\n",
+   Comment("CCI Trading System ROBOT v1.00", (InpReverseMode ? "  [TERS ISLEM MODU]" : ""), "\n",
            "Mod: ", ModeName(),
            " | Sembol: ", _Symbol, " | TF: ", EnumToString(g_tf),
            " | spread: ", DoubleToString((SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
@@ -1253,6 +1272,8 @@ int OnInit()
                (InpUseRiskPercent ? DoubleToString(InpRiskPercent, 2) : "kapali"),
                InpMagicNumber);
    Print("Sinyaller yalnizca KAPANMIS mumlarda degerlendirilir. Acilista gecmise donuk islem acilmaz.");
+   if(InpReverseMode)
+      Print(">>> TERS ISLEM MODU ACIK: BUY sinyalinde SELL, SELL sinyalinde BUY; SL ve TP yer degistirir <<<");
    Print("PRO: CCI +100/-100 kesimi -> geri cekilme (CCI sifir ustunde/altinda) -> 3-5 mum -> giris | SL swing, TP CCI 200/sifir");
    Print("DAY: cift asiri okuma (+/-200) -> uyumsuzluk -> CCI -100/+100 kesimi -> giris | cikis CCI +/-200 kesimi");
 

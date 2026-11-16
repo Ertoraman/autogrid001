@@ -258,6 +258,7 @@ Giriş: 2. fractal + 6–20 pip (fractal modu)
 | `InpMaxSpreadPoints` | `0` | Maks. spread (0 = kapalı) |
 | `InpMaxOpenPositions` | `1` | Maks. açık pozisyon |
 | `InpAllowLongs` / `InpAllowShorts` | `true` / `true` | Yön izinleri |
+| `InpReverseMode` | `false` | **Ters işlem modu**: BUY sinyalinde SELL, SL/TP yer değiştirir |
 | `InpMaxSL_ATR` | `3.0` | Bu ATR katını aşan SL'de işlem atlanır |
 | `InpMoneyTakeProfit` / `InpMoneyStopLoss` | `0` / `0` | Para bazlı çıkışlar |
 | `InpMaxPositionMinutes` | `0` | Maks. pozisyon süresi |
@@ -303,7 +304,27 @@ Yükleme: EA parametreleri → **Load** → `.set` dosyası.
 
 ---
 
-## 6. Risk ve Sınırlamalar
+## 6. Ters İşlem Modu (Reverse Mode)
+
+`InpReverseMode = true` iken bot **aynı sinyalleri ters yönde işler**:
+
+| Konu | Normal mod | Ters işlem modu |
+|---|---|---|
+| Sinyal yönü | BUY sinyali → BUY | BUY sinyali → **SELL** |
+| Sinyal yönü | SELL sinyali → SELL | SELL sinyali → **BUY** |
+| Stop Loss | stratejinin SL seviyesi | **eski TP mesafesinde** (girişin diğer tarafında) |
+| Take Profit | stratejinin TP seviyesi | **eski SL mesafesinde** |
+| TP'siz (gösterge çıkışlı) stratejiler | SL + gösterge çıkışı | SL girişe göre **aynalanır**, gösterge çıkışları pozisyon yönüne göre otomatik ters çalışır |
+| Bekleyen emirler | limit/stop | **limit ↔ stop** çevrilir (seviye piyasanın doğru tarafında kalır) |
+| Kısmi kâr (TP1) | TP1 + TP2 | SL ↔ en uzak hedef yer değişir, TP1 mesafesi SL'den gelir |
+
+**Nasıl çalışır:** sinyal/giriş koşulları, seviye hesapları ve trend/spread/saat filtreleri **hiç değişmez**; yalnızca emir gönderilirken yön ters çevrilir ve SL/TP **mesafeleri yer değiştirir**. `InpAllowLongs` / `InpAllowShorts` ve maks. SL (`InpMaxSL_ATR`) gibi risk filtreleri **işleme girecek gerçek yöne** uygulanır. Ters modda yeni SL mesafesi orijinalin TP mesafesi olduğu için maks. SL filtresi normalden sık devreye girebilir; gerekirse bu filtreyi gevşetin. Tüm hazır `.set` dosyalarında `InpReverseMode=false` gelir; ters mod için `true` yapın.
+
+Panel başlığında `[TERS ISLEM MODU]` görünür ve uzman günlüğüne uyarı basılır.
+
+> ⚠️ **Risk/ödül tersine döner:** orijinal strateji 20 pip SL / 40 pip TP kullanıyorsa ters modda 40 pip SL / 20 pip TP olur. Bu mod (a) bir stratejinin gerçekten kenar taşıyıp taşımadığını test etmek, (b) düşüş yükseliş dönemlerinde aynı kurulumların tersini işlemek için kullanılır. **Mutlaka Strategy Tester'da doğrulayın.**
+
+## 7. Risk ve Sınırlamalar
 
 - **Yatırım tavsiyesi değildir.** Kaldıraçlı işlemlerde ciddi kayıp riski vardır; **önce demo**.
 - Makale bu yaklaşımı **"sistem değil kavram"** olarak tanımlar: sabit istatistik yoktur, sonuçlar piyasa rejimine göre değişir. Bot kuralları nesnelleştirir ama **kârlılık garantisi vermez**.
@@ -315,7 +336,7 @@ Yükleme: EA parametreleri → **Load** → `.set` dosyası.
 
 ---
 
-## 7. Dosya Listesi
+## 8. Dosya Listesi
 
 | Dosya | Açıklama |
 |---|---|
@@ -327,7 +348,7 @@ Yükleme: EA parametreleri → **Load** → `.set` dosyası.
 
 ---
 
-## 8. Kaynakça
+## 9. Kaynakça
 
 - Trading Strategy Guides, *Easy Bounce Trading Strategy: Support And Resistance Levels* —
   <https://tradingstrategyguides.com/bounce-trading-strategy-in-forex/>

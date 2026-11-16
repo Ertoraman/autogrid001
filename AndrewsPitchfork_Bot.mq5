@@ -105,6 +105,7 @@ input int             InpMaxSpreadPoints = 0;   // Maksimum spread (point) - 0 =
 input int             InpMaxOpenPositions = 1;  // Maksimum acik pozisyon (0 = sinirsiz)
 input bool            InpAllowLongs     = true; // LONG islemler acik
 input bool            InpAllowShorts    = true; // SHORT islemler acik
+input bool            InpReverseMode    = false; // TERS ISLEM MODU: BUY sinyalinde SELL (SL/TP yer degisir)
 input double          InpMaxSL_ATR      = 5.0;  // SL mesafesi ATR x bu degeri asarsa islem atlanir (0 = kapali)
 input double          InpMoneyTakeProfit = 0.0; // Para TP (hesap birimi, 0 = kapali)
 input double          InpMoneyStopLoss  = 0.0;  // Para SL (hesap birimi, 0 = kapali)
@@ -661,18 +662,23 @@ double CalcLot(const int side, const double entry, const double sl)
 //+------------------------------------------------------------------+
 //| Emir acma                                                        |
 //+------------------------------------------------------------------+
-bool OpenForkTrade(const int side, const double sl, const double tp1, const double tp2,
+bool OpenForkTrade(const int side_in, const double sl_in, const double tp1_in, const double tp2_in,
                    const double atr1, const string signal_text,
                    const datetime signal_time, const double sig_high, const double sig_low)
   {
+   int side = side_in;
+   double sl = sl_in;
+   double tp1 = tp1_in;
+   double tp2 = tp2_in;
    if(side == 0)
       return false;
-   if(side > 0 && !InpAllowLongs)
+   int gate_side = (InpReverseMode ? -side : side);
+   if(gate_side > 0 && !InpAllowLongs)
      {
       g_last_action = "LONG giris ayarlardan kapali";
       return false;
      }
-   if(side < 0 && !InpAllowShorts)
+   if(gate_side < 0 && !InpAllowShorts)
      {
       g_last_action = "SHORT giris ayarlardan kapali";
       return false;
@@ -709,6 +715,24 @@ bool OpenForkTrade(const int side, const double sl, const double tp1, const doub
      }
 
    double entry = (side > 0 ? tick.ask : tick.bid);
+
+   // --- TERS ISLEM MODU: yon ters cevrilir, SL ve TP mesafeleri yer degistirir ---
+   // SL <-> TP2 (en uzak hedef) yer degisir; TP1 kismi hedefi SL mesafesini alir.
+   if(InpReverseMode)
+     {
+      double d_sl = (sl > 0.0 ? MathAbs(entry - sl) : 0.0);
+      double d_t1 = (tp1 > 0.0 ? MathAbs(tp1 - entry) : 0.0);
+      double d_t2 = (tp2 > 0.0 ? MathAbs(tp2 - entry) : 0.0);
+      side = -side;
+      double new_sl_d = (d_t2 > 0.0 ? d_t2 : d_sl);
+      double new_t1_d = d_sl;
+      double new_t2_d = d_t1;
+      if(new_sl_d > 0.0)
+         sl = NormalizePriceToTick(entry - side * new_sl_d, (side > 0 ? -1 : 1));
+      tp1 = (new_t1_d > 0.0 ? NormalizePriceToTick(entry + side * new_t1_d, (side > 0 ? -1 : 1)) : 0.0);
+      tp2 = (new_t2_d > 0.0 ? NormalizePriceToTick(entry + side * new_t2_d, (side > 0 ? -1 : 1)) : 0.0);
+     }
+
    double nsl   = NormalizePriceToTick(sl, (side > 0 ? -1 : 1));
    if(side > 0 && nsl >= entry)
      {
@@ -1186,7 +1210,7 @@ void UpdatePanel()
                             _Digits, ForkMedianAt(1), _Digits, ForkUpperAt(1),
                             _Digits, ForkLowerAt(1));
 
-   Comment("ANDREWS PITCHFORK ROBOT v1.00\n",
+   Comment("ANDREWS PITCHFORK ROBOT v1.00", (InpReverseMode ? "  [TERS ISLEM MODU]" : ""), "\n",
            "Sembol: ", _Symbol, " | TF: ", EnumToString(g_tf),
            " | spread: ", DoubleToString((SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
                                           SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point, 0),
@@ -1309,6 +1333,8 @@ int OnInit()
    PrintFormat("Risk: lot=%.2f risk=%s | max SL=%.1f ATR | magic=%d",
                InpLotSize, risk_txt, InpMaxSL_ATR, InpMagicNumber);
    Print("Sinyaller yalnizca KAPANMIS mumlarda degerlendirilir. Acilista gecmise donuk islem acilmaz.");
+   if(InpReverseMode)
+      Print(">>> TERS ISLEM MODU ACIK: BUY sinyalinde SELL, SELL sinyalinde BUY; SL ve TP yer degistirir <<<");
    Print("Akis: 3 pivot -> pitchfork -> kanal/median retesti -> giris | TP1 median (kismi+BE) | TP2 karsi cizgi | SL kanal disi");
 
    UpdatePanel();

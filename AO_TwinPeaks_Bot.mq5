@@ -105,6 +105,7 @@ input int             InpMaxSpreadPoints  = 0;    // Maksimum spread (point) - 0
 input int             InpMaxOpenPositions = 1;    // Maksimum acik pozisyon (0 = sinirsiz)
 input bool            InpAllowLongs       = true; // LONG islemler acik
 input bool            InpAllowShorts      = true; // SHORT islemler acik
+input bool            InpReverseMode      = false; // TERS ISLEM MODU: BUY sinyalinde SELL (SL/TP yer degisir)
 input double          InpMaxSL_ATR        = 3.0;  // SL mesafesi ATR x bu degeri asarsa islem atlanir (0 = kapali)
 input double          InpMoneyTakeProfit  = 0.0;  // Para TP (hesap birimi, 0 = kapali)
 input double          InpMoneyStopLoss    = 0.0;  // Para SL (hesap birimi, 0 = kapali)
@@ -647,18 +648,20 @@ void DrawSignalArrow(const datetime bar_time, const double high, const double lo
 //+------------------------------------------------------------------+
 //| Emir acma                                                        |
 //+------------------------------------------------------------------+
-bool OpenSignal(const int side, const double sl_ref, const double atr1,
+bool OpenSignal(const int side_in, const double sl_ref, const double atr1,
                 const string signal_text, const datetime signal_time,
                 const double sig_high, const double sig_low)
   {
+   int side = side_in;
    if(side == 0)
       return false;
-   if(side > 0 && !InpAllowLongs)
+   int gate_side = (InpReverseMode ? -side : side);
+   if(gate_side > 0 && !InpAllowLongs)
      {
       g_last_action = "LONG giris ayarlardan kapali";
       return false;
      }
-   if(side < 0 && !InpAllowShorts)
+   if(gate_side < 0 && !InpAllowShorts)
      {
       g_last_action = "SHORT giris ayarlardan kapali";
       return false;
@@ -697,6 +700,27 @@ bool OpenSignal(const int side, const double sl_ref, const double atr1,
    double entry = (side > 0 ? tick.ask : tick.bid);
    double buffer = InpSLBufferPoints * _Point;
    double sl = NormalizePriceToTick(sl_ref - side * buffer, (side > 0 ? -1 : 1));
+   double tp = 0.0;
+   if(InpUseFixedTP)
+      tp = NormalizePriceToTick(entry + side * InpFixedTP_RR * MathAbs(entry - sl),
+                                (side > 0 ? -1 : 1));
+
+   // --- TERS ISLEM MODU: yon ters cevrilir, SL ve TP mesafeleri yer degistirir ---
+   if(InpReverseMode)
+     {
+      double d_sl = (sl > 0.0 ? MathAbs(entry - sl) : 0.0);
+      double d_tp = (tp > 0.0 ? MathAbs(tp - entry) : 0.0);
+      side = -side;
+      if(d_sl > 0.0 || d_tp > 0.0)
+        {
+         double new_sl_dist = (d_tp > 0.0 ? d_tp : d_sl);
+         sl = NormalizePriceToTick(entry - side * new_sl_dist, (side > 0 ? -1 : 1));
+         tp = ((d_sl > 0.0 && d_tp > 0.0)
+               ? NormalizePriceToTick(entry + side * d_sl, (side > 0 ? -1 : 1))
+               : 0.0);
+        }
+     }
+
    if(side > 0 && sl >= entry)
      {
       g_skip_count++;
@@ -732,16 +756,11 @@ bool OpenSignal(const int side, const double sl_ref, const double atr1,
       return false;
      }
 
-   double tp = 0.0;
-   if(InpUseFixedTP)
+   if(tp > 0.0 && MathAbs(tp - entry) < min_distance + TickSize())
      {
-      tp = NormalizePriceToTick(entry + side * InpFixedTP_RR * risk, (side > 0 ? -1 : 1));
-      if(MathAbs(tp - entry) < min_distance + TickSize())
-        {
-         g_skip_count++;
-         g_last_action = "TP broker minimum mesafesinden kucuk, islem atlandi";
-         return false;
-        }
+      g_skip_count++;
+      g_last_action = "TP broker minimum mesafesinden kucuk, islem atlandi";
+      return false;
      }
 
    double volume = CalcLot(side, entry, sl);
@@ -1091,7 +1110,7 @@ void UpdatePanel()
    else if(g_bear_pattern)
       pattern_text = StringFormat("AYI (2. tepe %.6f, %d bar once)", g_pattern_high, g_pattern_age);
 
-   Comment("AO TWIN PEAKS ROBOT v1.00\n",
+   Comment("AO TWIN PEAKS ROBOT v1.00", (InpReverseMode ? "  [TERS ISLEM MODU]" : ""), "\n",
            "Sembol: ", _Symbol, " | TF: ", EnumToString(g_tf),
            " | spread: ", DoubleToString((SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
                                           SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point, 0),
@@ -1212,6 +1231,8 @@ int OnInit()
    PrintFormat("Risk: lot=%.2f risk=%s | max SL=%.1f ATR | cikis: AO iki ters renkli bar=%s",
                InpLotSize, risk_txt, InpMaxSL_ATR, exit_txt);
    Print("Sinyaller yalnizca KAPANMIS mumlarda degerlendirilir. Acilista gecmise donuk islem acilmaz.");
+   if(InpReverseMode)
+      Print(">>> TERS ISLEM MODU ACIK: BUY sinyalinde SELL, SELL sinyalinde BUY; SL ve TP yer degistirir <<<");
    Print("Akis: AO sifir alti -> iki dip (2. daha yuksek) -> yesil bar -> sifir kirilimi -> AL | SL swing dibi | TP: iki kirmizi bar");
 
    UpdatePanel();

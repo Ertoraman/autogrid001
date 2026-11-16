@@ -98,6 +98,7 @@ input int    InpMaxSpreadPoints  = 0;         // Maksimum spread (point) - 0 = k
 input int    InpMaxOpenPositions = 1;         // Ayni anda maks. pozisyon - 0 = sinirsiz
 input bool   InpAllowLongs       = true;      // LONG acilsin (yukselis trendinde dikdortgen)
 input bool   InpAllowShorts      = true;      // SHORT acilsin (dusus trendinde dikdortgen)
+input bool   InpReverseMode      = false;     // TERS ISLEM MODU: BUY sinyalinde SELL (SL/TP yer degisir)
 input double InpMaxSL_ATR        = 3.0;       // SL mesafesi ATR x bu degeri asarsa islem atlanir (0 = kapali)
 input double InpMoneyTakeProfit  = 0.0;       // Para TP (hesap birimi, 0 = kapali)
 input double InpMoneyStopLoss    = 0.0;       // Para SL (hesap birimi, 0 = kapali)
@@ -618,18 +619,22 @@ void DrawSignalArrow(const datetime bar_time, const double high,
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
   }
 
-bool OpenTrade(const int side, const double sl, const double tp,
+bool OpenTrade(const int side_in, const double sl_in, const double tp_in,
                const string signal_text, const datetime signal_time,
                const double sig_high, const double sig_low)
   {
+   int side = side_in;
+   double sl = sl_in;
+   double tp = tp_in;
    if(side == 0)
       return false;
-   if(side > 0 && !InpAllowLongs)
+   int gate_side = (InpReverseMode ? -side : side);
+   if(gate_side > 0 && !InpAllowLongs)
      {
       g_last_action = "LONG giris ayarlardan kapali";
       return false;
      }
-   if(side < 0 && !InpAllowShorts)
+   if(gate_side < 0 && !InpAllowShorts)
      {
       g_last_action = "SHORT giris ayarlardan kapali";
       return false;
@@ -666,6 +671,22 @@ bool OpenTrade(const int side, const double sl, const double tp,
      }
 
    double entry = (side > 0 ? tick.ask : tick.bid);
+
+   // --- TERS ISLEM MODU: yon ters cevrilir, SL ve TP mesafeleri yer degistirir ---
+   if(InpReverseMode)
+     {
+      double d_sl = (sl > 0.0 ? MathAbs(entry - sl) : 0.0);
+      double d_tp = (tp > 0.0 ? MathAbs(tp - entry) : 0.0);
+      side = -side;
+      if(d_sl > 0.0 || d_tp > 0.0)
+        {
+         double new_sl_dist = (d_tp > 0.0 ? d_tp : d_sl);
+         sl = NormalizePriceToTick(entry - side * new_sl_dist, (side > 0 ? -1 : 1));
+         tp = ((d_sl > 0.0 && d_tp > 0.0)
+               ? NormalizePriceToTick(entry + side * d_sl, (side > 0 ? -1 : 1))
+               : 0.0);
+        }
+     }
 
    // Broker minimum mesafe kontrolu
    long stops_level  = (long)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
@@ -797,6 +818,9 @@ void CheckTickExits()
 //+------------------------------------------------------------------+
 void CheckReenterExit(const MqlRates &rates[])
   {
+   // Ters islem modunda "kirilim basarisiz" cikisi ters calisir; kapatilir.
+   if(InpReverseMode)
+      return;
    if(!InpCloseOnReenter || g_rect_state == RECT_IDLE)
       return;
    if(CountOurPositions(0) == 0 || ArraySize(rates) < 2)
@@ -1032,7 +1056,7 @@ void UpdatePanel()
                                DoubleToString(g_rect_height, _Digits),
                                g_rect_touches_R, g_rect_touches_S, g_rect_wait_bars);
 
-   Comment("Rectangle Pattern ROBOT v1.00\n",
+   Comment("Rectangle Pattern ROBOT v1.00", (InpReverseMode ? "  [TERS ISLEM MODU]" : ""), "\n",
            "Sembol: ", _Symbol, " | TF: ", EnumToString(g_tf),
            " | spread: ", DoubleToString((SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
                                           SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point, 0),
@@ -1223,6 +1247,8 @@ int OnInit()
                (InpUseTrendFilter ? "ACIK" : "KAPALI"), InpLookbackBars,
                InpMinTouches, InpTPMultiplier, InpLotSize, InpMagicNumber);
    Print("Sinyaller yalnizca KAPANMIS mumlarda degerlendirilir. Acilista gecmise donuk islem acilmaz.");
+   if(InpReverseMode)
+      Print(">>> TERS ISLEM MODU ACIK: BUY sinyalinde SELL, SELL sinyalinde BUY; SL ve TP yer degistirir <<<");
    Print("Akis: trend -> dikdortgen (2+ temas) -> sahte kirilim -> kirilim kapanisi giris | SL direnc/destek disi, TP yukseklik x carpan");
 
    UpdatePanel();
