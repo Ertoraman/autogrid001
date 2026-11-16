@@ -1,6 +1,7 @@
 #property strict
-#property version   "1.03"
+#property version   "1.04"
 #property description "M1 volatility-sized fixed-price grid with closed-candle Heiken Ashi direction"
+#property description "Optional timed reverse-direction toggle and simultaneous normal + reverse modes"
 
 #include <Trade/Trade.mqh>
 
@@ -12,12 +13,35 @@ enum ENUM_SIGNAL_CANDLE_MODE
    SIGNAL_STANDARD_CANDLE = 1
   };
 
+// Automatic reverse-direction toggle interval (1 minute .. 1 year).
+enum ENUM_REVERSE_TOGGLE_PERIOD
+  {
+   TOGGLE_1_MINUTE = 0,   // 1 Dakika
+   TOGGLE_5_MINUTES,      // 5 Dakika
+   TOGGLE_15_MINUTES,     // 15 Dakika
+   TOGGLE_30_MINUTES,     // 30 Dakika
+   TOGGLE_1_HOUR,         // 1 Saat
+   TOGGLE_2_HOURS,        // 2 Saat
+   TOGGLE_4_HOURS,        // 4 Saat
+   TOGGLE_8_HOURS,        // 8 Saat
+   TOGGLE_12_HOURS,       // 12 Saat
+   TOGGLE_1_DAY,          // 1 Gün
+   TOGGLE_1_WEEK,         // 1 Hafta
+   TOGGLE_1_MONTH,        // 1 Ay
+   TOGGLE_3_MONTHS,       // 3 Ay
+   TOGGLE_6_MONTHS,       // 6 Ay
+   TOGGLE_1_YEAR          // 1 Yıl
+  };
+
 input group "Sinyal ve işlem yönü (M1 kapanmış mum)"
 input ENUM_TIMEFRAMES       InpSignalTimeframe          = PERIOD_M1;
 input ENUM_SIGNAL_CANDLE_MODE InpSignalCandleMode       = SIGNAL_HEIKEN_ASHI;
 input int                   InpSignalHistoryBars        = 300;
 input bool                  InpCloseOppositeOnColorChange      = false;  // true: renk değişince yeni işlem yönüne ters açık pozisyonları kapat
 input bool                  InpReverseTradeDirection    = false;  // true: yeşil sinyalde SHORT, kırmızı sinyalde LONG aç
+input bool                  InpAutoToggleReverseDirection = false;  // true: ters yön ayarı aşağıdaki zaman diliminde otomatik true<->false değişir
+input ENUM_REVERSE_TOGGLE_PERIOD InpReverseTogglePeriod  = TOGGLE_1_HOUR; // Otomatik true<->false değişim zaman dilimi
+input bool                  InpRunBothDirections        = false;  // true: normal (false) + ters (true) yön aynı anda; her mod kendi pozisyonlarını yönetir
 
 input group "Otomatik grid aralığı"
 input int                   InpGridRangeLookbackBars    = 20;     // Son kapanmış M1 mumları
@@ -36,8 +60,8 @@ input int                   InpStopLossGrids            = 10;
 input group "Pozisyon ve lot sınırları"
 input bool                  InpUseBrokerMinimumVolume   = false;  // true ise otomatik broker minimum hacmi
 input double                InpFixedLots                = 0.01;   // Varsayılan; minimum lotun altındaysa işlem atlanır
-input int                   InpMaxLayersPerSide         = 5;      // 0 = sınırsız
-input int                   InpMaxTotalPositions        = 10;     // Bu sembol + Magic; 0 = sınırsız
+input int                   InpMaxLayersPerSide         = 5;      // 0 = sınırsız; iki yön birlikte çalışırken her mod için ayrı
+input int                   InpMaxTotalPositions        = 10;     // Bu sembol + Magic; 0 = sınırsız; iki yön birlikte çalışırken her mod için ayrı
 input bool                  InpOnePositionPerGridLine   = true;
 input int                   InpMaxSpreadPoints          = 0;      // 0 = point bazlı ek filtre kapalı
 input double                InpMaxSpreadGridFraction    = 0.50;   // Spread > grid adımının bu oranıysa yeni giriş yok
@@ -65,6 +89,19 @@ int    g_down_state[];
 int      g_signal_side = 0; // +1 LONG, -1 SHORT, 0 no valid closed-bar signal
 double   g_profit_target_start_equity = 0.0;
 bool     g_profit_target_liquidating = false;
+
+// Reverse-direction auto toggle. The anchor is the EA start of the toggle cycle;
+// the state is derived from the number of elapsed intervals (no cumulative drift).
+bool     g_reverse_active = false;
+datetime g_reverse_toggle_anchor = 0;
+long     g_reverse_toggle_steps = 0;
+datetime g_next_reverse_toggle_time = 0;
+
+// Per-direction-mode state for "normal (false) + reverse (true)" simultaneous mode.
+double   g_mode_realized[2];
+bool     g_mode_liquidating[2];
+datetime g_mode_cycle_start[2];
+
 datetime g_last_signal_bar_time = 0;
 datetime g_last_state_flush = 0;
 string   g_last_action = "Başlatılıyor";
@@ -82,11 +119,50 @@ string SideName(const int side)
    return "BEKLENİYOR";
   }
 
+bool EffectiveReverseDirection()
+  {
+   // In simultaneous mode both directions run; the displayed direction follows the input.
+   if(InpAutoToggleReverseDirection && !InpRunBothDirections)
+      return g_reverse_active;
+   return InpReverseTradeDirection;
+  }
+
+int TradeSideForSignalMode(const int signal_side,const int mode)
+  {
+   if(signal_side == 0)
+      return 0;
+   return (mode == 1 ? -signal_side : signal_side);
+  }
+
 int TradeSideForSignal(const int signal_side)
   {
    if(signal_side == 0)
       return 0;
-   return (InpReverseTradeDirection ? -signal_side : signal_side);
+   return TradeSideForSignalMode(signal_side,(EffectiveReverseDirection() ? 1 : 0));
+  }
+
+string ModeName(const int mode)
+  {
+   return (mode == 1 ? "ters (true)" : "normal (false)");
+  }
+
+// Fills modes[] with the trade-direction modes that are currently allowed to open positions.
+// 0 = normal (false), 1 = reverse (true).
+int ActiveTradeModes(int &modes[])
+  {
+   ArrayResize(modes,0);
+   if(InpRunBothDirections)
+     {
+      if(ArrayResize(modes,2) < 2)
+         return 0;
+      modes[0] = 0;
+      modes[1] = 1;
+      return 2;
+     }
+   if(ArrayResize(modes,1) < 1)
+      return 0;
+   modes[0] = (EffectiveReverseDirection() ? 1 : 0);
+   return 1;
   }
 
 int SideFromPositionType(const long type)
@@ -235,6 +311,224 @@ void LoadProfitTargetState()
    g_profit_target_start_equity = current_equity;
    g_profit_target_liquidating = false;
    SaveProfitTargetState();
+  }
+
+//+------------------------------------------------------------------+
+//| Reverse-direction auto toggle (1 minute .. 1 year)                |
+//+------------------------------------------------------------------+
+string ReverseTogglePeriodName()
+  {
+   switch(InpReverseTogglePeriod)
+     {
+      case TOGGLE_1_MINUTE:  return "1 Dakika";
+      case TOGGLE_5_MINUTES: return "5 Dakika";
+      case TOGGLE_15_MINUTES:return "15 Dakika";
+      case TOGGLE_30_MINUTES:return "30 Dakika";
+      case TOGGLE_1_HOUR:    return "1 Saat";
+      case TOGGLE_2_HOURS:   return "2 Saat";
+      case TOGGLE_4_HOURS:   return "4 Saat";
+      case TOGGLE_8_HOURS:   return "8 Saat";
+      case TOGGLE_12_HOURS:  return "12 Saat";
+      case TOGGLE_1_DAY:     return "1 Gün";
+      case TOGGLE_1_WEEK:    return "1 Hafta";
+      case TOGGLE_1_MONTH:   return "1 Ay";
+      case TOGGLE_3_MONTHS:  return "3 Ay";
+      case TOGGLE_6_MONTHS:  return "6 Ay";
+      case TOGGLE_1_YEAR:    return "1 Yıl";
+     }
+   return "1 Saat";
+  }
+
+int ReverseToggleIntervalSeconds()
+  {
+   switch(InpReverseTogglePeriod)
+     {
+      case TOGGLE_1_MINUTE:  return 60;
+      case TOGGLE_5_MINUTES: return 5 * 60;
+      case TOGGLE_15_MINUTES:return 15 * 60;
+      case TOGGLE_30_MINUTES:return 30 * 60;
+      case TOGGLE_1_HOUR:    return 60 * 60;
+      case TOGGLE_2_HOURS:   return 2 * 60 * 60;
+      case TOGGLE_4_HOURS:   return 4 * 60 * 60;
+      case TOGGLE_8_HOURS:   return 8 * 60 * 60;
+      case TOGGLE_12_HOURS:  return 12 * 60 * 60;
+      case TOGGLE_1_DAY:     return 24 * 60 * 60;
+      case TOGGLE_1_WEEK:    return 7 * 24 * 60 * 60;
+     }
+   return 0; // Calendar based intervals are handled by ReverseToggleIntervalMonths().
+  }
+
+int ReverseToggleIntervalMonths()
+  {
+   switch(InpReverseTogglePeriod)
+     {
+      case TOGGLE_1_MONTH:  return 1;
+      case TOGGLE_3_MONTHS: return 3;
+      case TOGGLE_6_MONTHS: return 6;
+      case TOGGLE_1_YEAR:   return 12;
+     }
+   return 0;
+  }
+
+int DaysInCalendarMonth(const int year,const int month)
+  {
+   if(month < 1 || month > 12)
+      return 30;
+   if(month == 2 &&
+      ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)))
+      return 29;
+   int days[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+   return days[month - 1];
+  }
+
+datetime AddCalendarMonths(const datetime base,const int months)
+  {
+   MqlDateTime parts;
+   TimeToStruct(base,parts);
+   long total = (long)parts.year * 12 + (parts.mon - 1) + (long)months;
+   int new_year = (int)(total / 12);
+   int new_month = (int)(total % 12) + 1;
+   if(new_month < 1)
+     {
+      new_month += 12;
+      new_year -= 1;
+     }
+   MqlDateTime result = parts;
+   result.year = new_year;
+   result.mon = new_month;
+   result.day = (int)MathMin(parts.day,DaysInCalendarMonth(new_year,new_month));
+   return StructToTime(result);
+  }
+
+// Absolute time of the toggle with the given zero-based step, measured from the anchor.
+datetime ReverseToggleTimeAfter(const datetime anchor,const long step)
+  {
+   int months = ReverseToggleIntervalMonths();
+   if(months > 0)
+     {
+      datetime value = anchor;
+      for(long i=0; i<step; i++)
+         value = AddCalendarMonths(value,months);
+      return value;
+     }
+   int seconds = ReverseToggleIntervalSeconds();
+   if(seconds <= 0)
+      seconds = 3600;
+   return (datetime)((long)anchor + step * (long)seconds);
+  }
+
+void SaveReverseToggleState()
+  {
+   if(MQLInfoInteger(MQL_TESTER))
+      return;
+   GlobalVariableSet(GridStateKey("RVANCHOR"),(double)g_reverse_toggle_anchor);
+   GlobalVariableSet(GridStateKey("RVPER"),(double)InpReverseTogglePeriod);
+   GlobalVariableSet(GridStateKey("RVIN"),(InpReverseTradeDirection ? 1.0 : 0.0));
+   GlobalVariableSet(GridStateKey("RVNEXT"),(double)g_next_reverse_toggle_time);
+   GlobalVariablesFlush();
+  }
+
+void LoadReverseToggleState()
+  {
+   g_reverse_active = InpReverseTradeDirection;
+   g_reverse_toggle_anchor = 0;
+   g_reverse_toggle_steps = 0;
+   g_next_reverse_toggle_time = 0;
+
+   if(!InpAutoToggleReverseDirection || InpRunBothDirections)
+      return;
+
+   datetime now = TimeCurrent();
+   if(now <= 0)
+      now = TimeLocal();
+   if(now <= 0)
+      return;
+
+   datetime anchor = 0;
+   if(!MQLInfoInteger(MQL_TESTER) && !InpResetGridOnInit)
+     {
+      string anchor_key = GridStateKey("RVANCHOR");
+      string period_key = GridStateKey("RVPER");
+      string input_key = GridStateKey("RVIN");
+      if(GlobalVariableCheck(anchor_key) && GlobalVariableCheck(period_key) &&
+         GlobalVariableCheck(input_key) &&
+         (int)MathRound(GlobalVariableGet(period_key)) == (int)InpReverseTogglePeriod &&
+         ((GlobalVariableGet(input_key) > 0.5) == InpReverseTradeDirection))
+        {
+         double saved_anchor = GlobalVariableGet(anchor_key);
+         if(saved_anchor > 0.0 && (datetime)(long)saved_anchor <= now)
+            anchor = (datetime)(long)saved_anchor;
+        }
+     }
+   if(anchor == 0)
+      anchor = now; // First start (or changed configuration): the cycle starts here.
+
+   long steps = 0;
+   datetime next = 0;
+   int seconds = ReverseToggleIntervalSeconds();
+   int months = ReverseToggleIntervalMonths();
+   if(months == 0 && seconds > 0)
+     {
+      long elapsed = (long)now - (long)anchor;
+      if(elapsed < 0)
+         elapsed = 0;
+      steps = elapsed / (long)seconds;
+      next = (datetime)((long)anchor + (steps + 1) * (long)seconds);
+     }
+   else
+     {
+      int guard = 0;
+      next = ReverseToggleTimeAfter(anchor,1);
+      while(next > 0 && next <= now && guard < 100000)
+        {
+         steps++;
+         next = ReverseToggleTimeAfter(anchor,steps + 1);
+         guard++;
+        }
+     }
+
+   g_reverse_toggle_anchor = anchor;
+   g_reverse_toggle_steps = steps;
+   g_next_reverse_toggle_time = next;
+   g_reverse_active = (((steps % 2) == 0) ? InpReverseTradeDirection : !InpReverseTradeDirection);
+
+   SaveReverseToggleState();
+   PrintFormat("Ters yön otomatik geçişi hazır: aralık=%s döngü başı=%s geçiş=%I64d güncel=%s sonraki=%s",
+               ReverseTogglePeriodName(),TimeToString(anchor,TIME_DATE|TIME_MINUTES),steps,
+               (g_reverse_active ? "true" : "false"),
+               TimeToString(next,TIME_DATE|TIME_MINUTES));
+  }
+
+void UpdateReverseToggleState()
+  {
+   if(!InpAutoToggleReverseDirection || InpRunBothDirections)
+      return;
+   if(g_next_reverse_toggle_time <= 0)
+      return;
+   datetime now = TimeCurrent();
+   if(now <= 0 || now < g_next_reverse_toggle_time)
+      return;
+
+   bool changed = false;
+   int guard = 0;
+   while(now >= g_next_reverse_toggle_time && g_next_reverse_toggle_time > 0 && guard < 1000)
+     {
+      guard++;
+      g_reverse_toggle_steps++;
+      g_reverse_active = (((g_reverse_toggle_steps % 2) == 0) ? InpReverseTradeDirection
+                                                              : !InpReverseTradeDirection);
+      g_next_reverse_toggle_time = ReverseToggleTimeAfter(g_reverse_toggle_anchor,g_reverse_toggle_steps + 1);
+      changed = true;
+     }
+   if(!changed)
+      return;
+
+   SaveReverseToggleState();
+   g_last_action = StringFormat("Ters yön otomatik %s oldu",(g_reverse_active ? "true" : "false"));
+   PrintFormat("Ters yön otomatik değişti: %s | aralık=%s | sonraki=%s | yeni işlem yönü=%s",
+               (g_reverse_active ? "true" : "false"),ReverseTogglePeriodName(),
+               TimeToString(g_next_reverse_toggle_time,TIME_DATE|TIME_MINUTES),
+               SideName(TradeSideForSignal(g_signal_side)));
   }
 
 string PositionStateKey(const ulong position_id,const string field)
@@ -573,7 +867,7 @@ bool CalculateClosedCandleSignal(int &side_out,datetime &current_bar_time)
    return (side_out != 0);
   }
 
-void ClosePositionsOppositeToTradeSide(const int new_trade_side);
+void ClosePositionsOppositeToSignal(const int signal_side);
 
 void RefreshClosedCandleSignal(const bool force)
   {
@@ -599,7 +893,7 @@ void RefreshClosedCandleSignal(const bool force)
                   (InpSignalCandleMode == SIGNAL_HEIKEN_ASHI ? "Heiken Ashi" : "standard candle"));
       RecolorGridLines();
       if(InpCloseOppositeOnColorChange && old_side != 0)
-         ClosePositionsOppositeToTradeSide(TradeSideForSignal(new_side));
+         ClosePositionsOppositeToSignal(new_side);
      }
   }
 
@@ -617,17 +911,78 @@ bool SelectOurPosition(const ulong ticket)
    return true;
   }
 
+// Comment layout: "M1G:N:U5" (normal mode) or "M1G:R:D3" (reverse mode).
+// Legacy positions use "M1G:U5" and are treated as normal-direction positions.
+string StripModeTag(const string text)
+  {
+   int marker = StringFind(text,"M1G:");
+   if(marker < 0)
+      return "";
+   string line = StringSubstr(text,marker + 4);
+   if(StringFind(line,"N:") == 0 || StringFind(line,"R:") == 0)
+      line = StringSubstr(line,2);
+   return line;
+  }
+
+int ModeFromText(const string text)
+  {
+   int marker = StringFind(text,"M1G:");
+   if(marker < 0)
+      return -1;
+   string line = StringSubstr(text,marker + 4);
+   if(StringFind(line,"R:") == 0)
+      return 1;
+   if(StringFind(line,"N:") == 0)
+      return 0;
+   if(StringFind(line,"U") == 0 || StringFind(line,"D") == 0)
+      return 0; // Legacy comment without a mode tag.
+   return -1;
+  }
+
 int ParseLineCode(const string comment)
   {
-   int marker = StringFind(comment,"M1G:");
-   if(marker < 0)
+   string line = StripModeTag(comment);
+   if(line == "")
       return 0;
-   string line = StringSubstr(comment,marker + 4);
    if(StringFind(line,"U") == 0)
       return (int)StringToInteger(StringSubstr(line,1));
    if(StringFind(line,"D") == 0)
       return -(int)MathAbs((double)StringToInteger(StringSubstr(line,1)));
    return 0;
+  }
+
+// Trade-direction mode of an open position: 1 = reverse (true), 0 = normal (false),
+// -1 = not one of our positions.
+int PositionMode(const ulong ticket)
+  {
+   if(!PositionSelectByTicket(ticket))
+      return -1;
+   if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+      (ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+      return -1;
+   if(!MQLInfoInteger(MQL_TESTER))
+     {
+      ulong identifier = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+      string key = PositionStateKey(identifier,"RV");
+      if(GlobalVariableCheck(key))
+         return (int)(GlobalVariableGet(key) > 0.5 ? 1 : 0);
+     }
+   int parsed = ModeFromText(PositionGetString(POSITION_COMMENT));
+   return (parsed >= 0 ? parsed : 0);
+  }
+
+int DealMode(const ulong deal)
+  {
+   if(deal == 0 || !HistoryDealSelect(deal))
+      return -1;
+   ulong position_id = (ulong)HistoryDealGetInteger(deal,DEAL_POSITION_ID);
+   if(!MQLInfoInteger(MQL_TESTER) && position_id > 0)
+     {
+      string key = PositionStateKey(position_id,"RV");
+      if(GlobalVariableCheck(key))
+         return (int)(GlobalVariableGet(key) > 0.5 ? 1 : 0);
+     }
+   return ModeFromText(HistoryDealGetString(deal,DEAL_COMMENT));
   }
 
 int PositionLineCode(const ulong ticket)
@@ -644,7 +999,7 @@ int PositionLineCode(const ulong ticket)
   }
 
 void StorePositionSettings(const ulong identifier,const int line_code,const double grid_step,
-                           const int tp_grids,const int sl_grids)
+                           const int tp_grids,const int sl_grids,const int mode)
   {
    if(MQLInfoInteger(MQL_TESTER))
       return;
@@ -652,6 +1007,7 @@ void StorePositionSettings(const ulong identifier,const int line_code,const doub
    GlobalVariableSet(PositionStateKey(identifier,"GS"),grid_step);
    GlobalVariableSet(PositionStateKey(identifier,"TP"),(double)tp_grids);
    GlobalVariableSet(PositionStateKey(identifier,"SL"),(double)sl_grids);
+   GlobalVariableSet(PositionStateKey(identifier,"RV"),(mode == 1 ? 1.0 : 0.0));
    GlobalVariablesFlush();
   }
 
@@ -663,6 +1019,7 @@ void DeletePositionSettings(const ulong identifier)
    GlobalVariableDel(PositionStateKey(identifier,"GS"));
    GlobalVariableDel(PositionStateKey(identifier,"TP"));
    GlobalVariableDel(PositionStateKey(identifier,"SL"));
+   GlobalVariableDel(PositionStateKey(identifier,"RV"));
    GlobalVariablesFlush();
   }
 
@@ -704,10 +1061,12 @@ void GetPositionGridSettings(const ulong ticket,double &grid_step,int &tp_grids,
    // persist the settings on the next management pass using the position comment.
    string step_key = PositionStateKey(identifier,"GS");
    if(!GlobalVariableCheck(step_key))
-      StorePositionSettings(identifier,PositionLineCode(ticket),grid_step,tp_grids,sl_grids);
+      StorePositionSettings(identifier,PositionLineCode(ticket),grid_step,tp_grids,sl_grids,
+                            PositionMode(ticket));
   }
 
-int CountOurPositions(const int side_filter=0)
+// mode_filter: -1 = every direction mode, 0 = normal (false), 1 = reverse (true).
+int CountOurPositions(const int side_filter=0,const int mode_filter=-1)
   {
    int count = 0;
    for(int i=PositionsTotal()-1; i>=0; i--)
@@ -717,12 +1076,17 @@ int CountOurPositions(const int side_filter=0)
          continue;
       int side = SideFromPositionType(PositionGetInteger(POSITION_TYPE));
       if(side_filter == 0 || side == side_filter)
+        {
+         if(mode_filter >= 0 && PositionMode(ticket) != mode_filter)
+            continue;
          count++;
+        }
      }
    return count;
   }
 
-bool HasPositionOnGridLine(const int side,const int line_code)
+// mode: -1 = any direction mode, 0 = normal, 1 = reverse.
+bool HasPositionOnGridLine(const int side,const int line_code,const int mode)
   {
    for(int i=PositionsTotal()-1; i>=0; i--)
      {
@@ -731,10 +1095,104 @@ bool HasPositionOnGridLine(const int side,const int line_code)
          continue;
       if(SideFromPositionType(PositionGetInteger(POSITION_TYPE)) != side)
          continue;
-      if(PositionLineCode(ticket) == line_code)
+      if(PositionLineCode(ticket) != line_code)
+         continue;
+      if(mode < 0 || PositionMode(ticket) == mode)
          return true;
      }
    return false;
+  }
+
+double ModeFloatingProfit(const int mode)
+  {
+   double total = 0.0;
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !SelectOurPosition(ticket))
+         continue;
+      if(PositionMode(ticket) != mode)
+         continue;
+      total += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+     }
+   return total;
+  }
+
+double SumModeRealizedDeals(const int mode,const datetime from)
+  {
+   // Deals stamped exactly at the cycle start belong to the previous cycle.
+   datetime start = (from > 0 ? (datetime)((long)from + 1) : (datetime)0);
+   if(!HistorySelect(start,TimeCurrent()))
+      return 0.0;
+   double total = 0.0;
+   int deals = HistoryDealsTotal();
+   for(int i=0; i<deals; i++)
+     {
+      ulong deal = HistoryDealGetTicket(i);
+      if(deal == 0)
+         continue;
+      if(HistoryDealGetString(deal,DEAL_SYMBOL) != _Symbol ||
+         (ulong)HistoryDealGetInteger(deal,DEAL_MAGIC) != InpMagicNumber)
+         continue;
+      if(DealMode(deal) != mode)
+         continue;
+      total += HistoryDealGetDouble(deal,DEAL_PROFIT) +
+               HistoryDealGetDouble(deal,DEAL_SWAP) +
+               HistoryDealGetDouble(deal,DEAL_COMMISSION);
+     }
+   return total;
+  }
+
+void SaveModeProfitTargetState()
+  {
+   if(MQLInfoInteger(MQL_TESTER))
+      return;
+   for(int mode=0; mode<=1; mode++)
+     {
+      string tag = IntegerToString(mode);
+      GlobalVariableSet(GridStateKey("CST" + tag),(double)g_mode_cycle_start[mode]);
+      GlobalVariableSet(GridStateKey("CRL" + tag),g_mode_realized[mode]);
+      GlobalVariableSet(GridStateKey("CLQ" + tag),(g_mode_liquidating[mode] ? 1.0 : 0.0));
+     }
+   GlobalVariablesFlush();
+  }
+
+void LoadModeProfitTargetState()
+  {
+   for(int mode=0; mode<=1; mode++)
+     {
+      g_mode_realized[mode] = 0.0;
+      g_mode_liquidating[mode] = false;
+      g_mode_cycle_start[mode] = TimeCurrent();
+     }
+   if(MQLInfoInteger(MQL_TESTER))
+      return;
+
+   bool restored = true;
+   for(int mode=0; mode<=1 && restored; mode++)
+     {
+      string tag = IntegerToString(mode);
+      if(!GlobalVariableCheck(GridStateKey("CST" + tag)) ||
+         !GlobalVariableCheck(GridStateKey("CRL" + tag)) ||
+         !GlobalVariableCheck(GridStateKey("CLQ" + tag)))
+         restored = false;
+     }
+   if(restored)
+     {
+      for(int mode=0; mode<=1; mode++)
+        {
+         string tag = IntegerToString(mode);
+         datetime saved_start = (datetime)(long)GlobalVariableGet(GridStateKey("CST" + tag));
+         g_mode_cycle_start[mode] = (saved_start > 0 ? saved_start : TimeCurrent());
+         g_mode_liquidating[mode] = (GlobalVariableGet(GridStateKey("CLQ" + tag)) > 0.5);
+        }
+      // Rebuild the realized part from deal history so restarts never double count.
+      for(int mode=0; mode<=1; mode++)
+         g_mode_realized[mode] = SumModeRealizedDeals(mode,g_mode_cycle_start[mode]);
+      return;
+     }
+
+   SaveModeProfitTargetState();
   }
 
 double OrderVolume()
@@ -832,9 +1290,77 @@ void ReseedGridCrossState(const double current_price)
       g_down_state[i] = ComparePriceToLevel(current_price,GridLevelPrice(false,i));
   }
 
+// Simultaneous normal + reverse mode: every mode runs its own profit cycle on top of
+// its realized PnL and the floating PnL of the positions it opened itself.
+bool HandleModeEquityProfitTargets()
+  {
+   bool block_entries = false;
+   for(int mode=0; mode<=1; mode++)
+     {
+      double floating = ModeFloatingProfit(mode);
+      double total = g_mode_realized[mode] + floating;
+      if(!g_mode_liquidating[mode] && total >= InpCloseAllAtEquityGain)
+        {
+         g_mode_liquidating[mode] = true;
+         SaveModeProfitTargetState();
+         g_last_action = StringFormat("%s yönü kâr hedefi ulaştı; pozisyonlar kapatılıyor",ModeName(mode));
+         PrintFormat("%s yönü kâr hedefi ulaştı: gerçekleşen=%.2f yüzen=%.2f toplam=%.2f hedef=%.2f %s; yalnız bu yönün pozisyonları kapatılıyor.",
+                     ModeName(mode),g_mode_realized[mode],floating,total,InpCloseAllAtEquityGain,
+                     AccountInfoString(ACCOUNT_CURRENCY));
+        }
+
+      if(!g_mode_liquidating[mode])
+         continue;
+
+      block_entries = true;
+      ulong tickets[];
+      ArrayResize(tickets,0);
+      for(int i=PositionsTotal()-1; i>=0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0 || !SelectOurPosition(ticket))
+            continue;
+         if(PositionMode(ticket) != mode)
+            continue;
+         int n = ArraySize(tickets);
+         if(ArrayResize(tickets,n + 1) >= n + 1)
+            tickets[n] = ticket;
+        }
+      for(int i=0; i<ArraySize(tickets); i++)
+         CloseOurPosition(tickets[i],StringFormat("%s yönü kâr hedefi",ModeName(mode)));
+
+      int remaining = CountOurPositions(0,mode);
+      if(remaining > 0)
+        {
+         g_last_action = StringFormat("%s kâr hedefi: %d pozisyon daha kapatılacak",ModeName(mode),remaining);
+         continue;
+        }
+
+      // Start the next cycle of this mode only after all of its positions are closed.
+      g_mode_realized[mode] = 0.0;
+      g_mode_liquidating[mode] = false;
+      g_mode_cycle_start[mode] = TimeCurrent();
+      SaveModeProfitTargetState();
+      PrintFormat("%s yönü için yeni kâr hedefi döngüsü başladı: hedef=%.2f %s",
+                  ModeName(mode),InpCloseAllAtEquityGain,AccountInfoString(ACCOUNT_CURRENCY));
+     }
+
+   if(block_entries && CountOurPositions(0) == 0)
+     {
+      MqlTick tick;
+      if(SymbolInfoTick(_Symbol,tick))
+         ReseedGridCrossState(MidPrice(tick));
+     }
+   return block_entries; // Do not open replacement positions on a liquidation tick.
+  }
+
 bool HandleEquityProfitTarget()
   {
-   if(InpCloseAllAtEquityGain <= 0.0 || g_profit_target_start_equity <= 0.0)
+   if(InpCloseAllAtEquityGain <= 0.0)
+      return false;
+   if(InpRunBothDirections)
+      return HandleModeEquityProfitTargets();
+   if(g_profit_target_start_equity <= 0.0)
       return false;
 
    double current_equity = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -893,10 +1419,16 @@ bool HandleEquityProfitTarget()
    return true; // Do not open a replacement position on the same tick as target liquidation.
   }
 
-void ClosePositionsOppositeToTradeSide(const int new_trade_side)
+// Each active direction mode closes only the positions it opened itself.
+void ClosePositionsOppositeToSignal(const int signal_side)
   {
-   if(new_trade_side == 0)
+   if(signal_side == 0)
       return;
+   int modes[];
+   int mode_count = ActiveTradeModes(modes);
+   if(mode_count <= 0)
+      return;
+
    ulong tickets[];
    ArrayResize(tickets,0);
    for(int i=PositionsTotal()-1; i>=0; i--)
@@ -904,7 +1436,25 @@ void ClosePositionsOppositeToTradeSide(const int new_trade_side)
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0 || !SelectOurPosition(ticket))
          continue;
-      if(SideFromPositionType(PositionGetInteger(POSITION_TYPE)) == -new_trade_side)
+      int position_mode = PositionMode(ticket);
+      if(position_mode < 0)
+         continue;
+      int trade_side = 0;
+      if(InpRunBothDirections)
+        {
+         bool mode_active = false;
+         for(int m=0; m<mode_count; m++)
+            if(modes[m] == position_mode)
+               mode_active = true;
+         if(!mode_active)
+            continue;
+         trade_side = TradeSideForSignalMode(signal_side,position_mode);
+        }
+      else
+         trade_side = TradeSideForSignal(signal_side);
+      if(trade_side == 0)
+         continue;
+      if(SideFromPositionType(PositionGetInteger(POSITION_TYPE)) == -trade_side)
         {
          int n = ArraySize(tickets);
          if(ArrayResize(tickets,n + 1) >= n + 1)
@@ -970,7 +1520,7 @@ bool FindPositionFromDeal(const ulong deal,const int expected_side,const string 
    return (ticket_out > 0);
   }
 
-bool OpenGridPosition(const int side,const int line_code,const double signal_price)
+bool OpenGridPosition(const int side,const int line_code,const double signal_price,const int mode)
   {
    if(side == 0 || g_grid_step <= 0.0 || g_signal_side == 0)
       return false;
@@ -992,21 +1542,24 @@ bool OpenGridPosition(const int side,const int line_code,const double signal_pri
       return false;
      }
 
-   int side_count = CountOurPositions(side);
-   int total_count = CountOurPositions(0);
+   // When both directions run, limits are applied per direction mode so the normal and
+   // reverse engines never block each other. Otherwise every EA position is counted.
+   int limit_mode = (InpRunBothDirections ? mode : -1);
+   int side_count = CountOurPositions(side,limit_mode);
+   int total_count = CountOurPositions(0,limit_mode);
    if(InpMaxTotalPositions > 0 && total_count >= InpMaxTotalPositions)
      {
-      g_last_action = "Toplam pozisyon sınırı dolu";
+      g_last_action = StringFormat("%s yönü toplam pozisyon sınırı dolu",ModeName(mode));
       return false;
      }
    if(InpMaxLayersPerSide > 0 && side_count >= InpMaxLayersPerSide)
      {
-      g_last_action = StringFormat("%s katman sınırı dolu",SideName(side));
+      g_last_action = StringFormat("%s yönü %s katman sınırı dolu",ModeName(mode),SideName(side));
       return false;
      }
-   if(InpOnePositionPerGridLine && HasPositionOnGridLine(side,line_code))
+   if(InpOnePositionPerGridLine && HasPositionOnGridLine(side,line_code,limit_mode))
      {
-      g_last_action = "Bu grid çizgisinde aynı yönlü pozisyon açık";
+      g_last_action = StringFormat("%s yönünde bu grid çizgisinde aynı yönlü pozisyon açık",ModeName(mode));
       return false;
      }
 
@@ -1026,7 +1579,8 @@ bool OpenGridPosition(const int side,const int line_code,const double signal_pri
       return false;
      }
    string line_text = (line_code > 0 ? "U" + IntegerToString(line_code) : "D" + IntegerToString(-line_code));
-   string comment = "M1G:" + line_text;
+   string mode_tag = (mode == 1 ? "R:" : "N:");
+   string comment = "M1G:" + mode_tag + line_text;
    long request_time_msc = (long)tick.time_msc;
 
    bool sent = false;
@@ -1037,8 +1591,9 @@ bool OpenGridPosition(const int side,const int line_code,const double signal_pri
 
    if(!TradeRetcodeOK(sent))
      {
-      PrintFormat("Grid girişi başarısız side=%s line=%s lot=%.8f retcode=%u (%s)",
-                  SideName(side),line_text,volume,trade.ResultRetcode(),trade.ResultRetcodeDescription());
+      PrintFormat("Grid girişi başarısız mode=%s side=%s line=%s lot=%.8f retcode=%u (%s)",
+                  ModeName(mode),SideName(side),line_text,volume,trade.ResultRetcode(),
+                  trade.ResultRetcodeDescription());
       g_last_action = "Emir broker tarafından reddedildi";
       return false;
      }
@@ -1049,34 +1604,43 @@ bool OpenGridPosition(const int side,const int line_code,const double signal_pri
      {
       ulong identifier = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
       double fill_price = PositionGetDouble(POSITION_PRICE_OPEN);
-      StorePositionSettings(identifier,line_code,g_grid_step,InpTakeProfitGrids,InpStopLossGrids);
+      StorePositionSettings(identifier,line_code,g_grid_step,InpTakeProfitGrids,InpStopLossGrids,mode);
       ModifyPositionProtection(ticket,side,fill_price,g_grid_step,InpTakeProfitGrids,InpStopLossGrids);
-      PrintFormat("Grid giriş: %s line=%s signal=%.*f fill=%.*f lot=%.8f gridStep=%.*f TP=%.*f SL=%.*f",
-                  SideName(side),line_text,_Digits,signal_price,_Digits,fill_price,
+      PrintFormat("Grid giriş: mode=%s %s line=%s signal=%.*f fill=%.*f lot=%.8f gridStep=%.*f TP=%.*f SL=%.*f",
+                  ModeName(mode),SideName(side),line_text,_Digits,signal_price,_Digits,fill_price,
                   PositionGetDouble(POSITION_VOLUME),_Digits,g_grid_step,
                   _Digits,PositionTakeProfit(fill_price,side,g_grid_step,InpTakeProfitGrids),
                   _Digits,PositionStopLoss(fill_price,side,g_grid_step,InpStopLossGrids));
      }
    else
      {
-      PrintFormat("Grid emri kabul edildi side=%s line=%s; pozisyon sonraki tikte bulunacak.",SideName(side),line_text);
+      PrintFormat("Grid emri kabul edildi mode=%s side=%s line=%s; pozisyon sonraki tikte bulunacak.",
+                  ModeName(mode),SideName(side),line_text);
      }
 
-   g_last_action = StringFormat("Yeni %s giriş: %s",SideName(side),line_text);
+   g_last_action = StringFormat("Yeni %s %s giriş: %s",ModeName(mode),SideName(side),line_text);
    return true;
   }
 
 void HandleGridCross(const bool is_up,const int index,const int cross_direction,
                      const double current_price)
   {
-   int trade_side = TradeSideForSignal(g_signal_side);
-   if(trade_side == 0)
-      return;
-   if(!InpEnterOnAnyCross && cross_direction != trade_side)
+   int modes[];
+   int mode_count = ActiveTradeModes(modes);
+   if(mode_count <= 0)
       return;
 
    int line_code = (is_up ? index : -index);
-   OpenGridPosition(trade_side,line_code,current_price);
+   for(int m=0; m<mode_count; m++)
+     {
+      int mode = modes[m];
+      int trade_side = TradeSideForSignalMode(g_signal_side,mode);
+      if(trade_side == 0)
+         continue;
+      if(!InpEnterOnAnyCross && cross_direction != trade_side)
+         continue;
+      OpenGridPosition(trade_side,line_code,current_price,mode);
+     }
   }
 
 void ProcessGridCrosses(const double price)
@@ -1180,29 +1744,70 @@ void UpdateChartStatus()
       current_price = MidPrice(tick);
    int long_count = CountOurPositions(1);
    int short_count = CountOurPositions(-1);
+   int normal_count = CountOurPositions(0,0);
+   int reverse_count = CountOurPositions(0,1);
    double step_points = (g_grid_step > 0.0 ? g_grid_step / _Point : 0.0);
    double step_pips = (g_grid_step > 0.0 ? g_grid_step / PipSize() : 0.0);
    string signal_type = (InpSignalCandleMode == SIGNAL_HEIKEN_ASHI ? "HA" : "normal");
+
+   string direction_text = "";
+   if(InpRunBothDirections)
+      direction_text = StringFormat("%s + %s (normal + ters aynı anda)",
+                                    SideName(TradeSideForSignalMode(g_signal_side,0)),
+                                    SideName(TradeSideForSignalMode(g_signal_side,1)));
+   else
+      direction_text = SideName(TradeSideForSignal(g_signal_side));
+
+   string reverse_text = "";
+   if(InpRunBothDirections)
+      reverse_text = StringFormat("Ters yön ayarı: %s | İki yön aynı anda AÇIK (normal %d / ters %d pozisyon)",
+                                  (InpReverseTradeDirection ? "true" : "false"),normal_count,reverse_count);
+   else if(InpAutoToggleReverseDirection)
+      reverse_text = StringFormat("Ters yön ayarı: %s | Otomatik geçiş: %s | Sonraki: %s",
+                                  (EffectiveReverseDirection() ? "true" : "false"),
+                                  ReverseTogglePeriodName(),
+                                  (g_next_reverse_toggle_time > 0 ?
+                                   TimeToString(g_next_reverse_toggle_time,TIME_DATE|TIME_MINUTES) : "-"));
+   else
+      reverse_text = StringFormat("Ters yön ayarı: %s (otomatik geçiş kapalı)",
+                                  (InpReverseTradeDirection ? "true" : "false"));
+
    string target_status = "Özsermaye hedefi: kapalı";
    if(InpCloseAllAtEquityGain > 0.0)
      {
-      double equity_gain = AccountInfoDouble(ACCOUNT_EQUITY) - g_profit_target_start_equity;
-      target_status = StringFormat("Özsermaye hedefi: %.2f / %.2f %s%s",
-                                   equity_gain,InpCloseAllAtEquityGain,
-                                   AccountInfoString(ACCOUNT_CURRENCY),
-                                   (g_profit_target_liquidating ? " (pozisyonlar kapatılıyor)" : ""));
+      if(InpRunBothDirections)
+        {
+         double normal_pnl = g_mode_realized[0] + ModeFloatingProfit(0);
+         double reverse_pnl = g_mode_realized[1] + ModeFloatingProfit(1);
+         target_status = StringFormat("Özsermaye hedefi (yön başına): normal %.2f | ters %.2f / %.2f %s%s",
+                                      normal_pnl,reverse_pnl,InpCloseAllAtEquityGain,
+                                      AccountInfoString(ACCOUNT_CURRENCY),
+                                      ((g_mode_liquidating[0] || g_mode_liquidating[1]) ?
+                                       " (pozisyonlar kapatılıyor)" : ""));
+        }
+      else
+        {
+         double equity_gain = AccountInfoDouble(ACCOUNT_EQUITY) - g_profit_target_start_equity;
+         target_status = StringFormat("Özsermaye hedefi: %.2f / %.2f %s%s",
+                                      equity_gain,InpCloseAllAtEquityGain,
+                                      AccountInfoString(ACCOUNT_CURRENCY),
+                                      (g_profit_target_liquidating ? " (pozisyonlar kapatılıyor)" : ""));
+        }
      }
 
-   Comment("M1 Auto Grid HA v1.03\n",
+   Comment("M1 Auto Grid HA v1.04\n",
            "Sembol: ",_Symbol," | Mum yönü: ",signal_type," ",EnumToString(InpSignalTimeframe)," ",SideName(g_signal_side),"\n",
-           "İşlem yönü: ",SideName(TradeSideForSignal(g_signal_side)),
-           (InpReverseTradeDirection ? " (ters yön açık)" : ""),"\n",
+           "İşlem yönü: ",direction_text,"\n",
+           reverse_text,"\n",
            "Grid base: ",DoubleToString(g_grid_base,_Digits)," | anlık: ",DoubleToString(current_price,_Digits),"\n",
            "Sabit adım: ",DoubleToString(g_grid_step,_Digits)," (",DoubleToString(step_points,1)," point / ",
            DoubleToString(step_pips,2)," pip) | TP ",
            IntegerToString(InpTakeProfitGrids)," grid / SL ",IntegerToString(InpStopLossGrids)," grid\n",
            "Pozisyon LONG/SHORT: ",IntegerToString(long_count)," / ",IntegerToString(short_count),
-           " | Sınır/yan: ",IntegerToString(InpMaxLayersPerSide),"\n",
+           (InpRunBothDirections ?
+            StringFormat(" | normal %d / ters %d",normal_count,reverse_count) : ""),
+           " | Sınır/yan: ",IntegerToString(InpMaxLayersPerSide),
+           (InpRunBothDirections ? " (her yön için)" : ""),"\n",
            target_status,"\n",
            "Durum: ",g_last_action);
   }
@@ -1229,10 +1834,13 @@ double OnTester()
    // In optimization mode, use the Optimization Results table to rank passes.
    // Print one detailed line for a single backtest run (not once per optimizer pass).
    if(!MQLInfoInteger(MQL_OPTIMIZATION))
-      PrintFormat("Tester fitness=%.6f netProfit=%.2f equityDD=%.2f trades=%.0f; gridMultiplier=%.2f TP=%d SL=%d reverse=%s",
+      PrintFormat("Tester fitness=%.6f netProfit=%.2f equityDD=%.2f trades=%.0f; gridMultiplier=%.2f TP=%d SL=%d reverse=%s bothDirections=%s autoToggle=%s(%s)",
                   fitness,profit,equity_drawdown,trades,InpGridStepMultiplier,
                   InpTakeProfitGrids,InpStopLossGrids,
-                  (InpReverseTradeDirection ? "true" : "false"));
+                  (InpReverseTradeDirection ? "true" : "false"),
+                  (InpRunBothDirections ? "true" : "false"),
+                  (InpAutoToggleReverseDirection ? "true" : "false"),
+                  ReverseTogglePeriodName());
    return fitness;
   }
 
@@ -1287,19 +1895,36 @@ int OnInit()
      }
 
    LoadProfitTargetState();
+   LoadReverseToggleState();
+   LoadModeProfitTargetState();
    RefreshClosedCandleSignal(true);
    EventSetTimer(1);
 
-   PrintFormat("EA hazır: %s base=%.*f step=%.*f signal=%s %s trade=%s; TP=%d SL=%d hedging",
+   PrintFormat("EA hazır: %s base=%.*f step=%.*f signal=%s %s; TP=%d SL=%d; ters yön=%s; iki yön birlikte=%s; otomatik geçiş=%s (%s); hedging",
                _Symbol,_Digits,g_grid_base,_Digits,g_grid_step,
                (InpSignalCandleMode == SIGNAL_HEIKEN_ASHI ? "Heiken Ashi" : "normal mum"),
-               SideName(g_signal_side),SideName(TradeSideForSignal(g_signal_side)),
-               InpTakeProfitGrids,InpStopLossGrids);
+               SideName(g_signal_side),
+               InpTakeProfitGrids,InpStopLossGrids,
+               (EffectiveReverseDirection() ? "true" : "false"),
+               (InpRunBothDirections ? "true" : "false"),
+               (InpAutoToggleReverseDirection ? "true" : "false"),
+               ReverseTogglePeriodName());
    Print("Grid koordinatları ve hesaplanan adım sabit kalır. Çizgi rengi mum yönünü gösterir; ters yön girdisi işlem yönünü tersine çevirir.");
+   if(InpRunBothDirections)
+     {
+      Print("İki yön birlikte etkin: normal (false) ve ters (true) yön aynı anda işlem açar; ",
+            "her yön yalnız kendi açtığı pozisyonları, kendi katman/toplam/çizgi sınırlarını ve kendi kâr hedefi döngüsünü yönetir. ",
+            "Otomatik ters yön geçişi bu modda devre dışıdır.");
+     }
+   else if(InpAutoToggleReverseDirection)
+      PrintFormat("Otomatik ters yön geçişi etkin: her %s ters yön true<->false değişir; güncel=%s, sonraki değişim=%s.",
+                  ReverseTogglePeriodName(),(EffectiveReverseDirection() ? "true" : "false"),
+                  TimeToString(g_next_reverse_toggle_time,TIME_DATE|TIME_MINUTES));
    if(InpCloseAllAtEquityGain > 0.0)
-      PrintFormat("Özsermaye kâr hedefi etkin: başlangıç=%.2f hedef=%.2f %s",
+      PrintFormat("Özsermaye kâr hedefi etkin: başlangıç=%.2f hedef=%.2f %s (%s)",
                   g_profit_target_start_equity,InpCloseAllAtEquityGain,
-                  AccountInfoString(ACCOUNT_CURRENCY));
+                  AccountInfoString(ACCOUNT_CURRENCY),
+                  (InpRunBothDirections ? "her yön için ayrı döngü" : "hesap özsermayesi"));
    UpdateChartStatus();
    return INIT_SUCCEEDED;
   }
@@ -1313,6 +1938,7 @@ void OnDeinit(const int reason)
 
 void OnTimer()
   {
+   UpdateReverseToggleState();
    RefreshClosedCandleSignal(false);
    HandleEquityProfitTarget();
    UpdateChartStatus();
@@ -1342,6 +1968,7 @@ void OnTick()
    if(!SymbolInfoTick(_Symbol,tick) || tick.bid <= 0.0 || tick.ask <= 0.0)
       return;
 
+   UpdateReverseToggleState();
    RefreshClosedCandleSignal(false);
    if(HandleEquityProfitTarget())
      {
@@ -1366,6 +1993,21 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    if(HistoryDealGetString(trans.deal,DEAL_SYMBOL) != _Symbol ||
       (ulong)HistoryDealGetInteger(trans.deal,DEAL_MAGIC) != InpMagicNumber)
       return;
+
+   // Per-mode equity target accounting (both entry and exit deals, for commission/swap).
+   if(InpRunBothDirections && InpCloseAllAtEquityGain > 0.0)
+     {
+      int deal_mode = DealMode(trans.deal);
+      if(deal_mode >= 0 && deal_mode <= 1)
+        {
+         datetime deal_time = (datetime)HistoryDealGetInteger(trans.deal,DEAL_TIME);
+         // Deals from the previous cycle (e.g. delivered after the cycle reset) are ignored.
+         if(deal_time > g_mode_cycle_start[deal_mode])
+            g_mode_realized[deal_mode] += HistoryDealGetDouble(trans.deal,DEAL_PROFIT) +
+                                          HistoryDealGetDouble(trans.deal,DEAL_SWAP) +
+                                          HistoryDealGetDouble(trans.deal,DEAL_COMMISSION);
+        }
+     }
 
    long entry_kind = HistoryDealGetInteger(trans.deal,DEAL_ENTRY);
    if(entry_kind != DEAL_ENTRY_OUT && entry_kind != DEAL_ENTRY_OUT_BY && entry_kind != DEAL_ENTRY_INOUT)
