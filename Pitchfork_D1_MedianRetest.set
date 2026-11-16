@@ -1,0 +1,41 @@
+; Andrews Pitchfork Bot - D1 / MEDIAN RETEST
+; Kaynak: Trading Strategy Guides - Andrews Pitchfork Trading Strategy
+; Medyan kirilimindan sonra medyanin yeniden testi (makalenin 2. ilkesi)
+InpTimeframe=16408
+InpPivotStrength=3
+InpLookbackBars=400
+InpMaxForkAgeBars=250
+InpMinForkSpanBars=20
+InpMaxWaitRetestBars=100
+InpEntryMode=1
+InpLineToleranceATR=0.15
+InpPartialClosePercent=50.0
+InpMoveToBEAfterTP1=true
+InpSLBufferPips=25
+InpExitOnChannelBreak=false
+InpUseFixedTP=true
+InpLotSize=0.01
+InpUseRiskPercent=false
+InpRiskPercent=1.0
+InpMagicNumber=20261120
+InpDeviationPoints=20
+InpMaxSpreadPoints=0
+InpMaxOpenPositions=1
+InpAllowLongs=true
+InpAllowShorts=true
+InpMaxSL_ATR=6.0
+InpMoneyTakeProfit=0.0
+InpMoneyStopLoss=0.0
+InpMaxPositionMinutes=0
+InpMoveToBEAtRR=0.0
+InpUseTradingHours=false
+InpStartHour=0
+InpEndHour=24
+InpMaxTradesPerDay=0
+InpMaxDailyLoss=0.0
+InpDrawFork=true
+InpDrawForwardBars=20
+InpDrawArrows=true
+InpShowPanel=true
+InpDeleteOnExit=true
+InpLogSignals=false
