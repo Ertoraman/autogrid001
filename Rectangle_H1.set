@@ -1,6 +1,6 @@
 ; Rectangle Pattern Bot - H1 preset (swing tarzi)
 ; Kaynak: Trading Strategy Guides - Rectangle Chart Pattern (6 adim)
-InpTimeframe=60
+InpTimeframe=16385
 InpUseTrendFilter=true
 InpTrendFastEMA=20
 InpTrendSlowEMA=50

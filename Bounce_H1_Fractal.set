@@ -1,7 +1,7 @@
 ; S/R Bounce Bot - H1 / FRACTAL KIRILIMI preset
 ; Kaynak: Trading Strategy Guides - Bounce Trading Strategy in Forex
 ; 1. fractal bolgede, 2. fractal karsi tarafta; 6-20 pip otesinde giris
-InpTimeframe=60
+InpTimeframe=16385
 InpLookbackBars=400
 InpPivotStrength=2
 InpMinTouches=2

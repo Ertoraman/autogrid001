@@ -1,0 +1,41 @@
+; AO Twin Peaks Bot - D1 preset (makalenin onerilen zaman dilimi)
+; Kaynak: Trading Strategy Guides - Bill Williams Awesome Oscillator Strategy
+; 6 adim: AO sifir alti -> iki dip (2. daha yuksek) -> yesil bar -> sifir kirilimi -> AL
+InpTimeframe=16408
+InpMode=0
+InpAOFastPeriod=5
+InpAOSlowPeriod=34
+InpAOPivotStrength=2
+InpPatternLookbackBars=60
+InpMaxPatternAgeBars=30
+InpRequireZeroCross=true
+InpUseIndicatorExit=true
+InpExitOnOppositeZeroCross=false
+InpUseFixedTP=false
+InpFixedTP_RR=2.0
+InpSLSwingBars=2
+InpSLBufferPoints=0
+InpSLSwingLookbackBars=10
+InpLotSize=0.01
+InpUseRiskPercent=false
+InpRiskPercent=1.0
+InpMagicNumber=20261119
+InpDeviationPoints=20
+InpMaxSpreadPoints=0
+InpMaxOpenPositions=1
+InpAllowLongs=true
+InpAllowShorts=true
+InpMaxSL_ATR=4.0
+InpMoneyTakeProfit=0.0
+InpMoneyStopLoss=0.0
+InpMaxPositionMinutes=0
+InpMoveToBEAtRR=0.0
+InpUseTradingHours=false
+InpStartHour=0
+InpEndHour=24
+InpMaxTradesPerDay=0
+InpMaxDailyLoss=0.0
+InpDrawArrows=true
+InpShowPanel=true
+InpDeleteOnExit=true
+InpLogSignals=false
