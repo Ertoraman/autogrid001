@@ -1,4 +1,4 @@
-# İşlem Modu: Düz / Ters / Düz + Ters — 5 Bot için Ortak Özellik
+# İşlem Modu: Düz / Ters / Düz + Ters — 6 Bot için Ortak Özellik
 
 Bu doküman, projedeki **tüm strateji botlarında** bulunan `InpTradeMode` ayarını tek yerden açıklar.
 
@@ -8,7 +8,8 @@ Bu doküman, projedeki **tüm strateji botlarında** bulunan `InpTradeMode` ayar
 | Rectangle Pattern | `Rectangle_Pattern_Bot.mq5` | 20261117 | 20261118* | ✅ |
 | S/R Bounce | `Bounce_Trading_Bot.mq5` | 20261118 | 20261119* | ✅ |
 | AO Twin Peaks | `AO_TwinPeaks_Bot.mq5` | 20261119 | 20261120* | ✅ |
-| Andrews Pitchfork | `Andrews_Pitchfork_Bot.mq5` / `AndrewsPitchfork_Bot.mq5` | 20261120 | 20261121* | ✅ |
+| Andrews Pitchfork | `AndrewsPitchfork_Bot.mq5` | 20261120 | 20261121* | ✅ |
+| Donchian Trend Ranges | `DonchianTrendRanges_EA.mq5` | 20261109 | 20261110* | ✅ |
 
 \* Varsayılan ters magic = `InpMagicNumber + 1`. Botların magic numaraları birbirine bitişik olduğu için **aynı hesapta birden fazla bot çalıştıracaksanız `InpMagicMirror` değerini elle** çakışmayacak şekilde ayarlayın (ör. 20261116 → 30261116).
 
@@ -77,6 +78,16 @@ Seviye (`price`) değişmez; SL/TP mesafeleri yer değiştirir. Mod 2'de böylec
 - ⚠️ **Rectangle botunda** "dikdörtgene geri dönüş" çıkışı (`InpCloseOnReenter`) yalnızca **düz** pozisyonlara uygulanır.
 - ⚠️ **Mod değiştirmeden önce açık pozisyonları kapatın.** Mod 2'den çıkıldığında ikinci magic'li pozisyonlar yönetilmeye devam eder ama başabaş/kısmi kâr referansları geçersiz kalır.
 - Mod 2 iki kat emir, iki kat komisyon/spread demektir; net kâr hesabında bunu unutmayın.
+
+## 6b. Donchian Trend Ranges EA'ya özel notlar
+
+- Bu EA'da daha önce `InpReverseTrading` (true/false) vardı; yerini `InpTradeMode` + `InpMagicMirror` aldı.
+- SL/TP yalnızca **sabit point** (`InpFixedTpPoints` / `InpFixedSlPoints`) ile kurulur. Ters tarafta `BuildFixedPricesSwapped()` kullanılır: **SL = TP mesafesi**, **TP = SL mesafesi**.
+- Bekleyen emir yoktur; emirler piyasa emridir (`DON BUY D` / `DON BUY T` …).
+- Sinyal çıkışları (`InpLongTp/InpLongSl`, `InpShortTp/InpShortSl`) pozisyonun **kendi yönüne** göre değerlendirildiği için iki taraf kendi sinyalleriyle kapanır.
+- `InpCloseOppositeOnEntry` (ters yöndeki pozisyonu kapat) **mod 2'de uygulanmaz** (her iki yön açıldığı için anlamsız olur).
+- Mod 2 için **hedging hesap** gerekir; netting hesapta iki yön birbirini kapatır (EA açılışta uyarı basar).
+- Bu EA'nın repo'da hazır `.set` dosyası yoktur; parametreleri manuel ayarlayın.
 
 ## 7. Kod tarafı (özet)
 
