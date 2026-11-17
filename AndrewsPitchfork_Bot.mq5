@@ -76,6 +76,13 @@ enum ENUM_PF_ENTRY
 //+------------------------------------------------------------------+
 //| Girdiler                                                         |
 //+------------------------------------------------------------------+
+enum ENUM_TRADE_MODE
+  {
+   TRADE_MODE_NORMAL  = 0,   // Sadece DUZ islem
+   TRADE_MODE_REVERSE = 1,   // Sadece TERS islem
+   TRADE_MODE_BOTH    = 2    // DUZ + TERS ayni anda (ayri magic)
+  };
+
 input group "1) Pitchfork (3 pivot)"
 input ENUM_TIMEFRAMES InpTimeframe      = PERIOD_CURRENT; // Islem zaman dilimi (0 = grafik TF)
 input int             InpPivotStrength  = 3;    // Pivot icin bar sayisi (her iki yan)
@@ -105,7 +112,8 @@ input int             InpMaxSpreadPoints = 0;   // Maksimum spread (point) - 0 =
 input int             InpMaxOpenPositions = 1;  // Maksimum acik pozisyon (0 = sinirsiz)
 input bool            InpAllowLongs     = true; // LONG islemler acik
 input bool            InpAllowShorts    = true; // SHORT islemler acik
-input bool            InpReverseMode    = false; // TERS ISLEM MODU: BUY sinyalinde SELL (SL/TP yer degisir)
+input ENUM_TRADE_MODE InpTradeMode      = TRADE_MODE_NORMAL; // Islem modu: 0=duz 1=ters 2=duz+ters (ayri magic)
+input int             InpMagicMirror     = 0;    // Ters islem magic (0 = InpMagicNumber+1)
 input double          InpMaxSL_ATR      = 5.0;  // SL mesafesi ATR x bu degeri asarsa islem atlanir (0 = kapali)
 input double          InpMoneyTakeProfit = 0.0; // Para TP (hesap birimi, 0 = kapali)
 input double          InpMoneyStopLoss  = 0.0;  // Para SL (hesap birimi, 0 = kapali)
@@ -141,9 +149,9 @@ double   g_fork_slope    = 0.0;    // bar basina fiyat degisimi
 int      g_t1 = 0, g_t2 = 0, g_t3 = 0;
 double   g_p1 = 0.0, g_p2 = 0.0, g_p3 = 0.0;
 
-double   g_tp1_level     = 0.0;
-double   g_tp2_level     = 0.0;
-bool     g_tp1_done      = false;
+double   g_tp1_level[2]  = {0.0, 0.0};   // [0]=duz, [1]=ters
+double   g_tp2_level[2]  = {0.0, 0.0};
+bool     g_tp1_done[2]   = {false, false};
 
 int      g_signal_count  = 0;
 int      g_skip_count    = 0;
@@ -242,6 +250,47 @@ ENUM_TIMEFRAMES WorkingTimeframe()
 //+------------------------------------------------------------------+
 //| Pozisyon yardimcilari                                            |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Islem modu yardimcilari (duz / ters / ikisi birlikte)            |
+//+------------------------------------------------------------------+
+ulong g_magic_main   = 0;
+ulong g_magic_mirror = 0;
+
+bool ModeNormalOn()  { return (InpTradeMode == TRADE_MODE_NORMAL || InpTradeMode == TRADE_MODE_BOTH); }
+bool ModeReverseOn() { return (InpTradeMode == TRADE_MODE_REVERSE || InpTradeMode == TRADE_MODE_BOTH); }
+bool ModeBothOn()    { return (InpTradeMode == TRADE_MODE_BOTH); }
+
+ulong MagicOfMode(const int mode)
+  {
+   if(mode == 1 && ModeBothOn())
+      return g_magic_mirror;
+   return g_magic_main;
+  }
+
+int ModeOfMagic(const ulong magic)
+  {
+   if(g_magic_mirror != g_magic_main && magic == g_magic_mirror)
+      return 1;
+   // Sadece TERS modunda tum emirler ana magic ile acilir -> plan indeksi 1
+   if(!ModeNormalOn() && ModeReverseOn())
+      return 1;
+   return 0;
+  }
+
+bool IsOurMagic(const ulong magic)
+  {
+   return (magic == g_magic_main || magic == g_magic_mirror);
+  }
+
+string ModeText()
+  {
+   if(ModeBothOn())
+      return "DUZ+TERS";
+   if(ModeReverseOn())
+      return "TERS";
+   return "DUZ";
+  }
+
 bool SelectOurPosition(const ulong ticket)
   {
    if(ticket == 0)
@@ -250,7 +299,7 @@ bool SelectOurPosition(const ulong ticket)
       return false;
    if(PositionGetString(POSITION_SYMBOL) != _Symbol)
       return false;
-   if((ulong)PositionGetInteger(POSITION_MAGIC) != (ulong)InpMagicNumber)
+   if(!IsOurMagic((ulong)PositionGetInteger(POSITION_MAGIC)))
       return false;
    return true;
   }
@@ -345,7 +394,7 @@ int CountDealsToday(const datetime day_start)
       ulong ticket = HistoryDealGetTicket(i);
       if(ticket == 0)
          continue;
-      if((long)HistoryDealGetInteger(ticket, DEAL_MAGIC) != (long)InpMagicNumber)
+      if(!IsOurMagic((ulong)HistoryDealGetInteger(ticket, DEAL_MAGIC)))
          continue;
       if(HistoryDealGetString(ticket, DEAL_SYMBOL) != _Symbol)
          continue;
@@ -662,78 +711,35 @@ double CalcLot(const int side, const double entry, const double sl)
 //+------------------------------------------------------------------+
 //| Emir acma                                                        |
 //+------------------------------------------------------------------+
-bool OpenForkTrade(const int side_in, const double sl_in, const double tp1_in, const double tp2_in,
-                   const double atr1, const string signal_text,
-                   const datetime signal_time, const double sig_high, const double sig_low)
+// Tek bir emir gonderir (mode: 0 = duz magic, 1 = ters magic)
+bool SendEntry(const int side, const double entry, const double entry_sl,
+               const double entry_tp1, const double entry_tp2, const double atr1,
+               const int mode, const string signal_text, const datetime signal_time,
+               const double sig_high, const double sig_low)
   {
-   int side = side_in;
-   double sl = sl_in;
-   double tp1 = tp1_in;
-   double tp2 = tp2_in;
-   if(side == 0)
-      return false;
-   int gate_side = (InpReverseMode ? -side : side);
-   if(gate_side > 0 && !InpAllowLongs)
+   double sld = entry_sl;
+   double tp1 = entry_tp1;
+   double tp2 = entry_tp2;
+
+   if(side > 0 && !InpAllowLongs)
      {
       g_last_action = "LONG giris ayarlardan kapali";
       return false;
      }
-   if(gate_side < 0 && !InpAllowShorts)
+   if(side < 0 && !InpAllowShorts)
      {
       g_last_action = "SHORT giris ayarlardan kapali";
       return false;
      }
-   if(InpMaxOpenPositions > 0 && CountOurPositions(0) >= InpMaxOpenPositions)
+   int open_cnt = (ModeBothOn() ? CountOurPositions(side) : CountOurPositions(0));
+   if(InpMaxOpenPositions > 0 && open_cnt >= InpMaxOpenPositions)
      {
       g_skip_count++;
-      g_last_action = "Maksimum pozisyon sayisina ulasildi";
-      return false;
-     }
-   if(!WithinTradingHours())
-     {
-      g_skip_count++;
-      g_last_action = "Islem saatleri disinda";
-      return false;
-     }
-   if(!DailyLimitsOK())
-     {
-      g_skip_count++;
-      g_last_action = "Gunluk limit doldu";
+      g_last_action = StringFormat("%s yonunde maksimum pozisyon sayisina ulasildi", SideName(side));
       return false;
      }
 
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
-      return false;
-
-   double spread_points = (tick.ask - tick.bid) / _Point;
-   if(InpMaxSpreadPoints > 0 && spread_points > InpMaxSpreadPoints)
-     {
-      g_skip_count++;
-      g_last_action = StringFormat("Spread yuksek: %.1f point", spread_points);
-      return false;
-     }
-
-   double entry = (side > 0 ? tick.ask : tick.bid);
-
-   // --- TERS ISLEM MODU: yon ters cevrilir, SL ve TP mesafeleri yer degistirir ---
-   // SL <-> TP2 (en uzak hedef) yer degisir; TP1 kismi hedefi SL mesafesini alir.
-   if(InpReverseMode)
-     {
-      double d_sl = (sl > 0.0 ? MathAbs(entry - sl) : 0.0);
-      double d_t1 = (tp1 > 0.0 ? MathAbs(tp1 - entry) : 0.0);
-      double d_t2 = (tp2 > 0.0 ? MathAbs(tp2 - entry) : 0.0);
-      side = -side;
-      double new_sl_d = (d_t2 > 0.0 ? d_t2 : d_sl);
-      double new_t1_d = d_sl;
-      double new_t2_d = d_t1;
-      if(new_sl_d > 0.0)
-         sl = NormalizePriceToTick(entry - side * new_sl_d, (side > 0 ? -1 : 1));
-      tp1 = (new_t1_d > 0.0 ? NormalizePriceToTick(entry + side * new_t1_d, (side > 0 ? -1 : 1)) : 0.0);
-      tp2 = (new_t2_d > 0.0 ? NormalizePriceToTick(entry + side * new_t2_d, (side > 0 ? -1 : 1)) : 0.0);
-     }
-
-   double nsl   = NormalizePriceToTick(sl, (side > 0 ? -1 : 1));
+   double nsl = NormalizePriceToTick(sld, (side > 0 ? -1 : 1));
    if(side > 0 && nsl >= entry)
      {
       g_skip_count++;
@@ -787,7 +793,10 @@ bool OpenForkTrade(const int side_in, const double sl_in, const double tp1_in, c
       return false;
      }
 
-   string comment = (side > 0 ? "PF BUY" : "PF SELL");
+   string comment = (side > 0 ? "PF BUY " : "PF SELL ");
+   comment += (mode == 1 ? "T" : "D");
+
+   trade.SetExpertMagicNumber(MagicOfMode(mode));
    bool sent = false;
    if(side > 0)
       sent = trade.Buy(volume, _Symbol, 0.0, nsl, ntp, comment);
@@ -796,23 +805,90 @@ bool OpenForkTrade(const int side_in, const double sl_in, const double tp1_in, c
 
    if(!TradeRetcodeOK(sent))
      {
-      PrintFormat("Giris basarisiz: %s | yon=%s lot=%.8f retcode=%u (%s)",
-                  signal_text, SideName(side), volume,
+      PrintFormat("Giris basarisiz (%s): %s | yon=%s lot=%.8f retcode=%u (%s)",
+                  (mode == 1 ? "TERS" : "DUZ"), signal_text, SideName(side), volume,
                   trade.ResultRetcode(), trade.ResultRetcodeDescription());
       g_last_action = "Emir broker tarafindan reddedildi";
       return false;
      }
 
+   g_tp1_level[mode] = tp1;
+   g_tp2_level[mode] = tp2;
+   g_tp1_done[mode]  = false;
+   DrawSignalArrow(signal_time, sig_high, sig_low, side);
+   PrintFormat("GIRIS (%s): %s | yon=%s | sinyal mumu=%s | lot=%.8f | fiyat=%.*f | SL=%.*f | TP1=%.*f | TP2=%.*f | magic=%I64u",
+               (mode == 1 ? "TERS" : "DUZ"), signal_text, SideName(side), TimeToString(signal_time), volume,
+               _Digits, entry, _Digits, nsl, _Digits, tp1, _Digits, ntp, MagicOfMode(mode));
+   g_last_action = StringFormat("%s %s islem acildi (%s)", SideName(side),
+                                (mode == 1 ? "ters" : "duz"), signal_text);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Sinyal girisi: duz ve/veya ters emirleri acar                    |
+//+------------------------------------------------------------------+
+bool OpenForkTrade(const int side, const double sl_in, const double tp1_in, const double tp2_in,
+                   const double atr1, const string signal_text,
+                   const datetime signal_time, const double sig_high, const double sig_low)
+  {
+   if(side == 0)
+      return false;
+   if(!WithinTradingHours())
+     {
+      g_skip_count++;
+      g_last_action = "Islem saatleri disinda";
+      return false;
+     }
+   if(!DailyLimitsOK())
+     {
+      g_skip_count++;
+      g_last_action = "Gunluk limit doldu";
+      return false;
+     }
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
+      return false;
+
+   double spread_points = (tick.ask - tick.bid) / _Point;
+   if(InpMaxSpreadPoints > 0 && spread_points > InpMaxSpreadPoints)
+     {
+      g_skip_count++;
+      g_last_action = StringFormat("Spread yuksek: %.1f point", spread_points);
+      return false;
+     }
+
+   // --- DUZ yon plani ---
+   double entry = (side > 0 ? tick.ask : tick.bid);
+   bool any = false;
+
+   if(ModeNormalOn())
+      any = SendEntry(side, entry, sl_in, tp1_in, tp2_in, atr1, 0,
+                      signal_text, signal_time, sig_high, sig_low) || any;
+
+   // --- TERS yon plani: yon cevrilir, SL <-> TP2 yer degistirir ---
+   if(ModeReverseOn())
+     {
+      int    rside  = -side;
+      double rentry = (rside > 0 ? tick.ask : tick.bid);
+      double d_sl = (sl_in > 0.0 ? MathAbs(entry - sl_in) : 0.0);
+      double d_t1 = (tp1_in > 0.0 ? MathAbs(tp1_in - entry) : 0.0);
+      double d_t2 = (tp2_in > 0.0 ? MathAbs(tp2_in - entry) : 0.0);
+      double new_sl_d = (d_t2 > 0.0 ? d_t2 : d_sl);
+      double new_t1_d = d_sl;
+      double new_t2_d = d_t1;
+      double rsl = (new_sl_d > 0.0 ? NormalizePriceToTick(rentry - rside * new_sl_d, (rside > 0 ? -1 : 1)) : 0.0);
+      double rt1 = (new_t1_d > 0.0 ? NormalizePriceToTick(rentry + rside * new_t1_d, (rside > 0 ? -1 : 1)) : 0.0);
+      double rt2 = (new_t2_d > 0.0 ? NormalizePriceToTick(rentry + rside * new_t2_d, (rside > 0 ? -1 : 1)) : 0.0);
+      any = SendEntry(rside, rentry, rsl, rt1, rt2, atr1, 1,
+                      signal_text, signal_time, sig_high, sig_low) || any;
+     }
+
+   if(!any)
+      return false;
+
    g_signal_count++;
    RefreshDailyCounters();
-   g_tp1_level = tp1;
-   g_tp2_level = tp2;
-   g_tp1_done  = false;
-   DrawSignalArrow(signal_time, sig_high, sig_low, side);
-   PrintFormat("GIRIS: %s | yon=%s | sinyal mumu=%s | lot=%.8f | fiyat=%.*f | SL=%.*f | TP1=%.*f | TP2=%.*f",
-               signal_text, SideName(side), TimeToString(signal_time), volume,
-               _Digits, entry, _Digits, nsl, _Digits, tp1, _Digits, ntp);
-   g_last_action = StringFormat("%s islem acildi (%s)", SideName(side), signal_text);
    return true;
   }
 
@@ -823,9 +899,12 @@ void ManageForkPositions(const MqlRates &rates[], const double atr1)
   {
    if(CountOurPositions(0) == 0)
      {
-      g_tp1_done  = false;
-      g_tp1_level = 0.0;
-      g_tp2_level = 0.0;
+      for(int m = 0; m < 2; m++)
+        {
+         g_tp1_done[m]  = false;
+         g_tp1_level[m] = 0.0;
+         g_tp2_level[m] = 0.0;
+        }
       return;
      }
    if(ArraySize(rates) < 3)
@@ -842,11 +921,14 @@ void ManageForkPositions(const MqlRates &rates[], const double atr1)
       int side = SideFromPositionType(PositionGetInteger(POSITION_TYPE));
       if(side == 0)
          continue;
+      int    pmode = ModeOfMagic((ulong)PositionGetInteger(POSITION_MAGIC));
+      double lvl1  = g_tp1_level[pmode];
+      double lvl2  = g_tp2_level[pmode];
 
       // 1) TP1: median cizgisinde kismi kar + SL'yi BE'ye cek
-      if(!g_tp1_done && InpPartialClosePercent > 0.0 && g_tp1_level > 0.0)
+      if(!g_tp1_done[pmode] && InpPartialClosePercent > 0.0 && lvl1 > 0.0)
         {
-         bool hit = (side > 0 ? (close1 >= g_tp1_level) : (close1 <= g_tp1_level));
+         bool hit = (side > 0 ? (close1 >= lvl1) : (close1 <= lvl1));
          if(hit)
            {
             double cur_vol = PositionGetDouble(POSITION_VOLUME);
@@ -865,7 +947,7 @@ void ManageForkPositions(const MqlRates &rates[], const double atr1)
                done = true;    // kismi kapanis mumkun degil (lot kucuk)
             if(done)
               {
-               g_tp1_done = true;
+               g_tp1_done[pmode] = true;
                g_last_action = StringFormat("TP1 (median) alindi, %s", 
                                             (InpMoveToBEAfterTP1 ? "SL BE'ye cekildi" : "SL korunuyor"));
                if(InpMoveToBEAfterTP1 && SelectOurPosition(ticket))
@@ -881,9 +963,9 @@ void ManageForkPositions(const MqlRates &rates[], const double atr1)
         }
 
       // 2) TP2: karsi kanal cizgisi (broker TP yoksa EA kapatir)
-      if(g_tp2_level > 0.0)
+      if(lvl2 > 0.0)
         {
-         bool hit2 = (side > 0 ? (close1 >= g_tp2_level) : (close1 <= g_tp2_level));
+         bool hit2 = (side > 0 ? (close1 >= lvl2) : (close1 <= lvl2));
          if(hit2)
            {
             CloseOurPosition(ticket, "TP2 kanal cizgisi");
@@ -1210,7 +1292,7 @@ void UpdatePanel()
                             _Digits, ForkMedianAt(1), _Digits, ForkUpperAt(1),
                             _Digits, ForkLowerAt(1));
 
-   Comment("ANDREWS PITCHFORK ROBOT v1.00", (InpReverseMode ? "  [TERS ISLEM MODU]" : ""), "\n",
+   Comment("ANDREWS PITCHFORK ROBOT v1.00  [MOD: ", ModeText(), "]", "\n",
            "Sembol: ", _Symbol, " | TF: ", EnumToString(g_tf),
            " | spread: ", DoubleToString((SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
                                           SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point, 0),
@@ -1220,9 +1302,9 @@ void UpdatePanel()
            "Seviyeler: ", levels, "\n",
            "Durum: ", StateName(), "\n",
            "TP1 (kismi %", DoubleToString(InpPartialClosePercent, 0), "): ",
-           (g_tp1_level > 0.0 ? DoubleToString(g_tp1_level, _Digits) : "-"),
-           (g_tp1_done ? " [ALINDI]" : ""), "\n",
-           "TP2: ", (g_tp2_level > 0.0 ? DoubleToString(g_tp2_level, _Digits) : "-"),
+           (g_tp1_level[0] > 0.0 ? DoubleToString(g_tp1_level[0], _Digits) : "-"),
+           (g_tp1_done[0] ? " [ALINDI]" : ""), "\n",
+           "TP2: ", (g_tp2_level[0] > 0.0 ? DoubleToString(g_tp2_level[0], _Digits) : "-"),
            " | SL tampon: ", IntegerToString(InpSLBufferPips), " pip\n",
            "Acik pozisyon B/S: ", IntegerToString(CountOurPositions(1)), "/",
            IntegerToString(CountOurPositions(-1)),
@@ -1314,6 +1396,11 @@ int OnInit()
       return INIT_FAILED;
      }
 
+   g_magic_main   = (ulong)InpMagicNumber;
+   g_magic_mirror = (InpMagicMirror > 0 ? (ulong)InpMagicMirror : (ulong)InpMagicNumber + 1);
+   if(g_magic_mirror == g_magic_main)
+      g_magic_mirror = g_magic_main + 1;
+
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpDeviationPoints);
    trade.SetAsyncMode(false);
@@ -1333,8 +1420,12 @@ int OnInit()
    PrintFormat("Risk: lot=%.2f risk=%s | max SL=%.1f ATR | magic=%d",
                InpLotSize, risk_txt, InpMaxSL_ATR, InpMagicNumber);
    Print("Sinyaller yalnizca KAPANMIS mumlarda degerlendirilir. Acilista gecmise donuk islem acilmaz.");
-   if(InpReverseMode)
-      Print(">>> TERS ISLEM MODU ACIK: BUY sinyalinde SELL, SELL sinyalinde BUY; SL ve TP yer degistirir <<<");
+   PrintFormat(">>> ISLEM MODU: %s | duz magic=%I64u | ters magic=%I64u <<<",
+               ModeText(), g_magic_main, g_magic_mirror);
+   if(ModeReverseOn())
+      Print(">>> TERS ISLEM: BUY sinyalinde SELL, SELL sinyalinde BUY; SL <-> TP2 yer degistirir <<<");
+   if(ModeBothOn())
+      Print(">>> DUZ+TERS: her sinyalde iki yonde ayri emir acilir; pozisyonlar kendi magic'leriyle ayri yonetilir <<<");
    Print("Akis: 3 pivot -> pitchfork -> kanal/median retesti -> giris | TP1 median (kismi+BE) | TP2 karsi cizgi | SL kanal disi");
 
    UpdatePanel();

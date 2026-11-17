@@ -247,7 +247,8 @@ SL: son `InpSLSwingLookbackBars` barın swing dibi/tepesi (`InpSLBufferPoints` t
 | `InpMaxSpreadPoints` | `0` | Maks. spread (0 = kapalı) |
 | `InpMaxOpenPositions` | `1` | Maks. açık pozisyon |
 | `InpAllowLongs` / `InpAllowShorts` | `true` / `true` | Yön izinleri |
-| `InpReverseMode` | `false` | **Ters işlem modu**: BUY sinyalinde SELL, SL/TP yer değiştirir |
+| `InpTradeMode` | `0` | **İşlem modu**: `0` = düz, `1` = ters, `2` = düz + ters aynı anda |
+| `InpMagicMirror` | `0` | Ters işlemler için magic numarası (0 = `InpMagicNumber` + 1) |
 | `InpMaxSL_ATR` | `3.0` | Bu ATR katını aşan SL'de işlem atlanır |
 | `InpMoneyTakeProfit` / `InpMoneyStopLoss` | `0` / `0` | Para bazlı çıkışlar |
 | `InpMaxPositionMinutes` | `0` | Maks. pozisyon süresi |
@@ -294,25 +295,39 @@ Yükleme: EA parametreleri → **Load** → `.set` dosyası.
 
 ---
 
-## 6. Ters İşlem Modu (Reverse Mode)
+## 6. İşlem Modu: Düz / Ters / Düz + Ters (aynı anda)
 
-`InpReverseMode = true` iken bot **aynı sinyalleri ters yönde işler**:
+Tek bir parametre (`InpTradeMode`) üç çalışma biçimi sunar:
 
-| Konu | Normal mod | Ters işlem modu |
+| Değer | Mod | Davranış |
 |---|---|---|
-| Sinyal yönü | BUY sinyali → BUY | BUY sinyali → **SELL** |
-| Sinyal yönü | SELL sinyali → SELL | SELL sinyali → **BUY** |
+| `0` | Düz | Sinyal yönünde işlem (klasik) |
+| `1` | Ters | BUY sinyali → SELL, SELL sinyali → BUY; SL/TP mesafeleri yer değiştirir |
+| `2` | Düz + Ters | **Her sinyalde iki yönlü emir açılır:** düz emir ana magic ile, ters emir ikinci magic ile; iki pozisyon birbirinden bağımsız yönetilir |
+
+### Ayrı yönetim nasıl sağlanır?
+
+- Düz işlemler `InpMagicNumber`, ters işlemler `InpMagicMirror` (0 ise `InpMagicNumber + 1`) magic numarasını kullanır.
+- Her pozisyon **kendi yönüne ve kendi magic'ine göre** yönetilir: strateji çıkışları, SL/TP, başabaş takibi (`InpMoveToBEAtRR`) ve kısmi kâr seviyeleri mod bazında ayrı tutulur.
+- `InpMaxOpenPositions` mod 2'de **yön başına** uygulanır (ör. 1 → en fazla 1 düz + 1 ters). Tek modlarda eski davranış korunur (toplam pozisyon).
+- Panelde `[MOD: DUZ]`, `[MOD: TERS]` veya `[MOD: DUZ+TERS]` görünür; uzman günlüğüne mod ve iki magic numarası yazılır.
+
+### SL/TP aynalaması (ters taraf)
+
+| Konu | Düz taraf | Ters taraf |
+|---|---|---|
+| Sinyal yönü | BUY → BUY, SELL → SELL | BUY → **SELL**, SELL → **BUY** |
 | Stop Loss | stratejinin SL seviyesi | **eski TP mesafesinde** (girişin diğer tarafında) |
 | Take Profit | stratejinin TP seviyesi | **eski SL mesafesinde** |
-| TP'siz (gösterge çıkışlı) stratejiler | SL + gösterge çıkışı | SL girişe göre **aynalanır**, gösterge çıkışları pozisyon yönüne göre otomatik ters çalışır |
-| Bekleyen emirler | limit/stop | **limit ↔ stop** çevrilir (seviye piyasanın doğru tarafında kalır) |
+| TP'siz (gösterge çıkışlı) stratejiler | SL + gösterge çıkışı | SL girişe göre aynalanır; gösterge çıkışları pozisyon yönüne göre otomatik ters çalışır |
+| Bekleyen emirler | limit / stop | **limit ↔ stop** (seviye piyasanın doğru tarafında kalır) |
 | Kısmi kâr (TP1) | TP1 + TP2 | SL ↔ en uzak hedef yer değişir, TP1 mesafesi SL'den gelir |
 
-**Nasıl çalışır:** sinyal/giriş koşulları, seviye hesapları ve trend/spread/saat filtreleri **hiç değişmez**; yalnızca emir gönderilirken yön ters çevrilir ve SL/TP **mesafeleri yer değiştirir**. `InpAllowLongs` / `InpAllowShorts` ve maks. SL (`InpMaxSL_ATR`) gibi risk filtreleri **işleme girecek gerçek yöne** uygulanır. Ters modda yeni SL mesafesi orijinalin TP mesafesi olduğu için maks. SL filtresi normalden sık devreye girebilir; gerekirse bu filtreyi gevşetin. Tüm hazır `.set` dosyalarında `InpReverseMode=false` gelir; ters mod için `true` yapın.
+Sinyal/giriş koşulları, seviye hesapları ve trend/spread/saat filtreleri **hiç değişmez**; yalnızca emir gönderilirken yön ve SL/TP mesafeleri çevrilir. `InpAllowLongs` / `InpAllowShorts` ve maks. SL (`InpMaxSL_ATR`) filtreleri **işleme girecek gerçek yöne** uygulanır. Hazır `.set` dosyalarında `InpTradeMode=0` ve `InpMagicMirror=0` gelir.
 
-Panel başlığında `[TERS ISLEM MODU]` görünür ve uzman günlüğüne uyarı basılır.
-
-> ⚠️ **Risk/ödül tersine döner:** orijinal strateji 20 pip SL / 40 pip TP kullanıyorsa ters modda 40 pip SL / 20 pip TP olur. Bu mod (a) bir stratejinin gerçekten kenar taşıyıp taşımadığını test etmek, (b) düşüş yükseliş dönemlerinde aynı kurulumların tersini işlemek için kullanılır. **Mutlaka Strategy Tester'da doğrulayın.**
+> ⚠️ **Mod 1 ve 2'de risk/ödül tersine döner:** orijinal strateji 20 pip SL / 40 pip TP kullanıyorsa ters taraf 40 pip SL / 20 pip TP ile çalışır. Ayrıca ters tarafta SL mesafesi orijinalin TP mesafesi olduğu için `InpMaxSL_ATR` filtresi normalden sık devreye girebilir; gerekirse gevşetin.
+>
+> ⚠️ **Mod değiştirmeden önce açık pozisyonları kapatın.** Mod 2'den çıkarsanız ikinci magic ile açılmış pozisyonların başabaş/kısmi kâr referansları geçersiz kalır (pozisyonlar yine de SL/TP ve strateji çıkışlarıyla yönetilir).
 
 ## 7. Risk ve Sınırlamalar
 

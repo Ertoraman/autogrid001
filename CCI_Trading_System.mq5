@@ -87,6 +87,13 @@ enum ENUM_SETUP_STATE
 //+------------------------------------------------------------------+
 //| Girdiler                                                         |
 //+------------------------------------------------------------------+
+enum ENUM_TRADE_MODE
+  {
+   TRADE_MODE_NORMAL  = 0,   // Sadece DUZ islem
+   TRADE_MODE_REVERSE = 1,   // Sadece TERS islem
+   TRADE_MODE_BOTH    = 2    // DUZ + TERS ayni anda (ayri magic)
+  };
+
 input group "1) Strateji modu ve CCI ayarlari"
 input ENUM_CCI_MODE   InpMode            = CCI_MODE_PRO;    // Strateji modu
 input ENUM_TIMEFRAMES InpTimeframe       = PERIOD_CURRENT;  // Islem zaman dilimi (0 = grafik TF)
@@ -117,7 +124,8 @@ input int    InpMaxSpreadPoints  = 0;         // Maksimum spread (point) - 0 = k
 input int    InpMaxOpenPositions = 1;         // Ayni anda maks. pozisyon - 0 = sinirsiz
 input bool   InpAllowLongs       = true;      // LONG acilsin
 input bool   InpAllowShorts      = true;      // SHORT acilsin
-input bool   InpReverseMode      = false;     // TERS ISLEM MODU: BUY sinyalinde SELL (SL/TP yer degisir)
+input ENUM_TRADE_MODE InpTradeMode = TRADE_MODE_NORMAL; // Islem modu: 0=duz 1=ters 2=duz+ters (ayri magic)
+input int    InpMagicMirror      = 0;         // Ters islem magic (0 = InpMagicNumber+1)
 input double InpMaxSL_ATR        = 3.0;       // SL mesafesi ATR x bu degeri asarsa islem atlanir (0 = kapali)
 input int    InpSLBufferPoints   = 10;        // Swing SL tamponu (point)
 input int    InpFixedTpPoints    = 0;         // Sabit TP (point, 0 = kapali; TP varsayilan CCI ile)
@@ -242,6 +250,58 @@ ENUM_TIMEFRAMES WorkingTimeframe()
 //+------------------------------------------------------------------+
 //| Pozisyon yardimcilari                                            |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Islem modu yardimcilari (duz / ters / ikisi birlikte)            |
+//+------------------------------------------------------------------+
+ulong g_magic_main   = 0;
+ulong g_magic_mirror = 0;
+
+bool ModeNormalOn()
+  {
+   return (InpTradeMode == TRADE_MODE_NORMAL || InpTradeMode == TRADE_MODE_BOTH);
+  }
+
+bool ModeReverseOn()
+  {
+   return (InpTradeMode == TRADE_MODE_REVERSE || InpTradeMode == TRADE_MODE_BOTH);
+  }
+
+bool ModeBothOn()
+  {
+   return (InpTradeMode == TRADE_MODE_BOTH);
+  }
+
+ulong MagicOfMode(const int mode)
+  {
+   if(mode == 1 && ModeBothOn())
+      return g_magic_mirror;
+   return g_magic_main;
+  }
+
+int ModeOfMagic(const ulong magic)
+  {
+   if(g_magic_mirror != g_magic_main && magic == g_magic_mirror)
+      return 1;
+   // Sadece TERS modunda tum emirler ana magic ile acilir -> plan indeksi 1
+   if(!ModeNormalOn() && ModeReverseOn())
+      return 1;
+   return 0;
+  }
+
+bool IsOurMagic(const ulong magic)
+  {
+   return (magic == g_magic_main || magic == g_magic_mirror);
+  }
+
+string ModeText()
+  {
+   if(ModeBothOn())
+      return "DUZ+TERS";
+   if(ModeReverseOn())
+      return "TERS";
+   return "DUZ";
+  }
+
 bool SelectOurPosition(const ulong ticket)
   {
    if(ticket == 0)
@@ -250,7 +310,7 @@ bool SelectOurPosition(const ulong ticket)
       return false;
    if(PositionGetString(POSITION_SYMBOL) != _Symbol)
       return false;
-   if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+   if(!IsOurMagic((ulong)PositionGetInteger(POSITION_MAGIC)))
       return false;
    return true;
   }
@@ -549,86 +609,30 @@ void DrawSignalArrow(const datetime bar_time, const double high,
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
   }
 
-bool OpenTrade(const int side_in, const double swing_sl, const string signal_text,
-               const datetime signal_time, const double sig_high, const double sig_low)
+// Tek bir emir gonderir (mode: 0 = duz magic, 1 = ters magic)
+bool SendEntry(const int side, const double entry, const double entry_sl, const double entry_tp,
+               const int mode, const string signal_text, const datetime signal_time,
+               const double sig_high, const double sig_low)
   {
-   int side = side_in;
-   if(side == 0)
-      return false;
-   int gate_side = (InpReverseMode ? -side : side);
-   if(gate_side > 0 && !InpAllowLongs)
+   double sl = entry_sl;
+   double tp = entry_tp;
+
+   if(side > 0 && !InpAllowLongs)
      {
       g_last_action = "LONG giris ayarlardan kapali";
       return false;
      }
-   if(gate_side < 0 && !InpAllowShorts)
+   if(side < 0 && !InpAllowShorts)
      {
       g_last_action = "SHORT giris ayarlardan kapali";
       return false;
      }
-   if(InpMaxOpenPositions > 0 && CountOurPositions(0) >= InpMaxOpenPositions)
+   int open_cnt = (ModeBothOn() ? CountOurPositions(side) : CountOurPositions(0));
+   if(InpMaxOpenPositions > 0 && open_cnt >= InpMaxOpenPositions)
      {
       g_skip_count++;
-      g_last_action = "Maksimum pozisyon sayisina ulasildi";
+      g_last_action = StringFormat("%s yonunde maksimum pozisyon sayisina ulasildi", SideName(side));
       return false;
-     }
-   if(!WithinTradingHours())
-     {
-      g_skip_count++;
-      g_last_action = "Islem saatleri disinda";
-      return false;
-     }
-   if(!DailyLimitsOK())
-     {
-      g_skip_count++;
-      g_last_action = "Gunluk limit doldu";
-      return false;
-     }
-
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
-      return false;
-
-   double spread_points = (tick.ask - tick.bid) / _Point;
-   if(InpMaxSpreadPoints > 0 && spread_points > InpMaxSpreadPoints)
-     {
-      g_skip_count++;
-      g_last_action = StringFormat("Spread yuksek: %.1f point", spread_points);
-      return false;
-     }
-
-   double entry = (side > 0 ? tick.ask : tick.bid);
-
-   // SL: varsayilan swing SL; sabit SL aciksa o kullanilir
-   double sl = 0.0;
-   if(InpFixedSlPoints > 0)
-      sl = NormalizePriceToTick(entry - side * InpFixedSlPoints * _Point,
-                                (side > 0 ? -1 : 1));
-   else if(swing_sl > 0.0)
-     {
-      double buffer = InpSLBufferPoints * _Point;
-      sl = NormalizePriceToTick(swing_sl - side * buffer, (side > 0 ? -1 : 1));
-     }
-
-   double tp = 0.0;
-   if(InpFixedTpPoints > 0)
-      tp = NormalizePriceToTick(entry + side * InpFixedTpPoints * _Point,
-                                (side > 0 ? 1 : -1));
-
-   // --- TERS ISLEM MODU: yon ters cevrilir, SL ve TP mesafeleri yer degistirir ---
-   if(InpReverseMode)
-     {
-      double d_sl = (sl > 0.0 ? MathAbs(entry - sl) : 0.0);
-      double d_tp = (tp > 0.0 ? MathAbs(tp - entry) : 0.0);
-      side = -side;
-      if(d_sl > 0.0 || d_tp > 0.0)
-        {
-         double new_sl_dist = (d_tp > 0.0 ? d_tp : d_sl);   // TP mesafesi SL olur
-         sl = NormalizePriceToTick(entry - side * new_sl_dist, (side > 0 ? -1 : 1));
-         tp = ((d_sl > 0.0 && d_tp > 0.0)
-               ? NormalizePriceToTick(entry + side * d_sl, (side > 0 ? -1 : 1))
-               : 0.0);                                     // SL mesafesi TP olur
-        }
      }
 
    // Broker minimum mesafe kontrolu
@@ -671,7 +675,10 @@ bool OpenTrade(const int side_in, const double swing_sl, const string signal_tex
       return false;
      }
 
-   string comment = (side > 0 ? "CCI BUY" : "CCI SELL");
+   string comment = (side > 0 ? "CCI BUY " : "CCI SELL ");
+   comment += (mode == 1 ? "T" : "D");
+
+   trade.SetExpertMagicNumber(MagicOfMode(mode));
    bool sent = false;
    if(side > 0)
       sent = trade.Buy(volume, _Symbol, 0.0, sl, tp, comment);
@@ -680,21 +687,100 @@ bool OpenTrade(const int side_in, const double swing_sl, const string signal_tex
 
    if(!TradeRetcodeOK(sent))
      {
-      PrintFormat("Giris basarisiz: %s | yon=%s lot=%.8f retcode=%u (%s)",
-                  signal_text, SideName(side), volume,
+      PrintFormat("Giris basarisiz (%s): %s | yon=%s lot=%.8f retcode=%u (%s)",
+                  (mode == 1 ? "TERS" : "DUZ"), signal_text, SideName(side), volume,
                   trade.ResultRetcode(), trade.ResultRetcodeDescription());
       g_last_action = "Emir broker tarafindan reddedildi";
       return false;
      }
 
+   DrawSignalArrow(signal_time, sig_high, sig_low, side);
+   PrintFormat("GIRIS (%s): %s | yon=%s | sinyal mumu=%s | lot=%.8f | fiyat=%.*f | SL=%.*f | TP=%.*f | magic=%I64u",
+               (mode == 1 ? "TERS" : "DUZ"), signal_text, SideName(side), TimeToString(signal_time),
+               volume, _Digits, entry, _Digits, sl, _Digits, tp, MagicOfMode(mode));
+   g_last_action = StringFormat("%s %s islem acildi (%s)", SideName(side),
+                                (mode == 1 ? "ters" : "duz"), signal_text);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Sinyal girisi: duz ve/veya ters emirleri acar                    |
+//+------------------------------------------------------------------+
+bool OpenTrade(const int side, const double swing_sl, const string signal_text,
+               const datetime signal_time, const double sig_high, const double sig_low)
+  {
+   if(side == 0)
+      return false;
+   if(!WithinTradingHours())
+     {
+      g_skip_count++;
+      g_last_action = "Islem saatleri disinda";
+      return false;
+     }
+   if(!DailyLimitsOK())
+     {
+      g_skip_count++;
+      g_last_action = "Gunluk limit doldu";
+      return false;
+     }
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
+      return false;
+
+   double spread_points = (tick.ask - tick.bid) / _Point;
+   if(InpMaxSpreadPoints > 0 && spread_points > InpMaxSpreadPoints)
+     {
+      g_skip_count++;
+      g_last_action = StringFormat("Spread yuksek: %.1f point", spread_points);
+      return false;
+     }
+
+   // --- DUZ yon plani ---
+   double entry = (side > 0 ? tick.ask : tick.bid);
+   double sl = 0.0;
+   if(InpFixedSlPoints > 0)
+      sl = NormalizePriceToTick(entry - side * InpFixedSlPoints * _Point,
+                                (side > 0 ? -1 : 1));
+   else if(swing_sl > 0.0)
+     {
+      double buffer = InpSLBufferPoints * _Point;
+      sl = NormalizePriceToTick(swing_sl - side * buffer, (side > 0 ? -1 : 1));
+     }
+   double tp = 0.0;
+   if(InpFixedTpPoints > 0)
+      tp = NormalizePriceToTick(entry + side * InpFixedTpPoints * _Point,
+                                (side > 0 ? 1 : -1));
+
+   bool any = false;
+
+   if(ModeNormalOn())
+      any = SendEntry(side, entry, sl, tp, 0, signal_text, signal_time, sig_high, sig_low) || any;
+
+   // --- TERS yon plani: yon cevrilir, SL/TP mesafeleri yer degistirir ---
+   if(ModeReverseOn())
+     {
+      int    rside  = -side;
+      double rentry = (rside > 0 ? tick.ask : tick.bid);
+      double d_sl = (sl > 0.0 ? MathAbs(entry - sl) : 0.0);
+      double d_tp = (tp > 0.0 ? MathAbs(tp - entry) : 0.0);
+      double rsl = 0.0, rtp = 0.0;
+      if(d_sl > 0.0 || d_tp > 0.0)
+        {
+         double new_sl_dist = (d_tp > 0.0 ? d_tp : d_sl);   // TP mesafesi SL olur
+         rsl = NormalizePriceToTick(rentry - rside * new_sl_dist, (rside > 0 ? -1 : 1));
+         if(d_sl > 0.0 && d_tp > 0.0)
+            rtp = NormalizePriceToTick(rentry + rside * d_sl, (rside > 0 ? -1 : 1));
+        }
+      any = SendEntry(rside, rentry, rsl, rtp, 1, signal_text, signal_time, sig_high, sig_low) || any;
+     }
+
+   if(!any)
+      return false;
+
    g_signal_count++;
    RefreshDailyCounters();
    g_trades_today++;
-   DrawSignalArrow(signal_time, sig_high, sig_low, side);
-   PrintFormat("GIRIS: %s | yon=%s | sinyal mumu=%s | lot=%.8f | fiyat=%.*f | SL=%.*f | TP=%.*f",
-               signal_text, SideName(side), TimeToString(signal_time),
-               volume, _Digits, entry, _Digits, sl, _Digits, tp);
-   g_last_action = StringFormat("%s islem acildi (%s)", SideName(side), signal_text);
    ResetSetup("");
    return true;
   }
@@ -1071,7 +1157,7 @@ void UpdatePanel()
                                 g_pullback_count, InpPullbackCandles,
                                 DoubleToString(g_setup_extreme, _Digits));
 
-   Comment("CCI Trading System ROBOT v1.00", (InpReverseMode ? "  [TERS ISLEM MODU]" : ""), "\n",
+   Comment("CCI Trading System ROBOT v1.00  [MOD: ", ModeText(), "]", "\n",
            "Mod: ", ModeName(),
            " | Sembol: ", _Symbol, " | TF: ", EnumToString(g_tf),
            " | spread: ", DoubleToString((SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
@@ -1253,6 +1339,11 @@ int OnInit()
         }
      }
 
+   g_magic_main   = (ulong)InpMagicNumber;
+   g_magic_mirror = (InpMagicMirror > 0 ? (ulong)InpMagicMirror : (ulong)InpMagicNumber + 1);
+   if(g_magic_mirror == g_magic_main)
+      g_magic_mirror = g_magic_main + 1;
+
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpDeviationPoints);
    trade.SetAsyncMode(false);
@@ -1272,8 +1363,12 @@ int OnInit()
                (InpUseRiskPercent ? DoubleToString(InpRiskPercent, 2) : "kapali"),
                InpMagicNumber);
    Print("Sinyaller yalnizca KAPANMIS mumlarda degerlendirilir. Acilista gecmise donuk islem acilmaz.");
-   if(InpReverseMode)
-      Print(">>> TERS ISLEM MODU ACIK: BUY sinyalinde SELL, SELL sinyalinde BUY; SL ve TP yer degistirir <<<");
+   PrintFormat(">>> ISLEM MODU: %s | duz magic=%I64u | ters magic=%I64u <<<",
+               ModeText(), g_magic_main, g_magic_mirror);
+   if(ModeReverseOn())
+      Print(">>> TERS ISLEM: BUY sinyalinde SELL, SELL sinyalinde BUY; SL ve TP mesafeleri yer degistirir <<<");
+   if(ModeBothOn())
+      Print(">>> DUZ+TERS: her sinyalde iki yonde ayri emir acilir; pozisyonlar kendi magic'leriyle ayri yonetilir <<<");
    Print("PRO: CCI +100/-100 kesimi -> geri cekilme (CCI sifir ustunde/altinda) -> 3-5 mum -> giris | SL swing, TP CCI 200/sifir");
    Print("DAY: cift asiri okuma (+/-200) -> uyumsuzluk -> CCI -100/+100 kesimi -> giris | cikis CCI +/-200 kesimi");
 
